@@ -13,10 +13,6 @@ class RobustAttackerDetector(nn.Module):
         - Layer 2: Linear(256, 128) -> BatchNorm -> LeakyReLU -> Dropout
         - Layer 3: Linear(128, 64) -> BatchNorm -> LeakyReLU -> Dropout
         - Output: Linear(64, 1)
-    
-    Args:
-        input_dim: Number of input features
-        dropout_rate: Dropout probability (default: 0.2)
     """
     
     def __init__(self, input_dim: int, dropout_rate: float = 0.2):

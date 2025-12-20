@@ -105,11 +105,9 @@ def main():
     """Main entry point."""
     args = parse_args()
     
-    # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Load data
     print(f"\nLoading data from: {args.data_path}")
     df = load_data(args.data_path)
     
@@ -118,7 +116,6 @@ def main():
     
     print(f"\nTraining features ({len(TRAINING_FEATURES)}): {TRAINING_FEATURES}")
     
-    # Prepare data
     print("\nPreparing data...")
     X_train, X_test, y_train, y_test, scaler, test_indices = prepare_data(
         df,
@@ -127,7 +124,6 @@ def main():
         random_state=args.seed
     )
     
-    # Create model
     print(f"\nCreating {args.model} model...")
     model = get_model(
         args.model,
@@ -140,13 +136,11 @@ def main():
     trainer = Trainer(model, device, learning_rate=args.lr, model_type=args.model, epochs=args.epochs)
     trainer.fit(X_train, y_train, epochs=args.epochs, batch_size=args.batch_size)
     
-    # Save model if output dir specified
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
         model_path = os.path.join(args.output_dir, 'model.pt')
         trainer.save(model_path)
     
-    # Sensitivity analysis
     print("\nRunning Sensitivity Analysis...")
     df_test = df.iloc[test_indices].reset_index(drop=True)
     
@@ -162,13 +156,11 @@ def main():
     print("\nSensitivity Analysis Results:")
     print(sensitivity_df.to_string(index=False))
     
-    # Save results
     if args.output_dir:
         results_path = os.path.join(args.output_dir, 'sensitivity_results.csv')
         sensitivity_df.to_csv(results_path, index=False)
         print(f"\nResults saved to: {results_path}")
     
-    # Plot all metrics
     if not args.no_plot:
         metrics = ['F1_Score', 'Accuracy', 'Precision', 'Recall']
         

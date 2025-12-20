@@ -13,10 +13,6 @@ class AttackerDiscriminator(nn.Module):
         - Feature Extractor: Linear(input_dim, 128) -> LayerNorm -> LeakyReLU -> Dropout
                             -> Linear(128, 64) -> LayerNorm -> LeakyReLU -> Dropout
         - Discriminator: Linear(64, 32) -> LeakyReLU -> Dropout -> Linear(32, 1)
-    
-    Args:
-        input_dim: Number of input features
-        dropout_rate: Dropout probability (default: 0.2)
     """
     
     def __init__(self, input_dim: int, dropout_rate: float = 0.2):

@@ -7,6 +7,9 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -23,17 +26,6 @@ def run_sensitivity_analysis(
 ) -> pd.DataFrame:
     """
     Evaluate model performance across parameter values using batch processing.
-    
-    Args:
-        model: Trained PyTorch model
-        test_df: Test DataFrame with features, labels, and context columns
-        scaler: Fitted StandardScaler
-        feature_cols: List of feature column names
-        device: Torch device
-        batch_size: Batch size for prediction (RAM optimization)
-    
-    Returns:
-        DataFrame with sensitivity analysis results
     """
     model.eval()
     results = []
@@ -98,14 +90,6 @@ def plot_sensitivity_metric(
     metric: str = 'F1_Score',
     save_path: str = None
 ) -> None:
-    """
-    Plot sensitivity analysis results for a specific metric.
-    
-    Args:
-        sensitivity_df: DataFrame from run_sensitivity_analysis
-        metric: Metric to plot ('F1_Score', 'Accuracy', 'Precision', 'Recall')
-        save_path: Optional path to save the figure
-    """
     sns.set_style("whitegrid")
     sns.set_context("paper", font_scale=1.2)
     
@@ -151,5 +135,9 @@ def plot_sensitivity_metric(
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Plot saved to: {save_path}")
+    else:
+        plt.savefig(f'sensitivity_{metric.lower()}.png', dpi=150, bbox_inches='tight')
+        print(f"Plot saved to: sensitivity_{metric.lower()}.png")
     
-    plt.show()
+    plt.close(fig)
+
