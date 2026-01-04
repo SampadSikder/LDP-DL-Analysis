@@ -13,10 +13,44 @@ A deep learning-based attacker detection system for Local Differential Privacy (
 ## Installation
 
 ```bash
-# Create conda environment
 conda env create -f environment.yml
 conda activate attacker-detector
 ```
+
+## Dataset Generation
+
+Generate LDP attack detection training data:
+
+```bash
+# Generate with defaults
+python generate_dataset.py --output dataset.csv
+
+# Custom configuration
+python generate_dataset.py --output custom.csv \
+    --protocols OUE OLH \
+    --epsilons 0.5 1.0 2.0 \
+    --datasets zipf emoji fire \
+    --ratios 0.10 0.15 0.20 \
+    --experiments 5
+```
+
+### Dataset Generation CLI Arguments
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--output`, `-o` | Output CSV file path | *required* |
+| `--protocols` | LDP protocols: `OUE`, `OLH` | `['OUE', 'OLH']` |
+| `--epsilons` | Privacy parameters | `[0.5, 0.7, 1.0, 1.5]` |
+| `--datasets` | Dataset types: `zipf`, `emoji`, `fire` | all three |
+| `--ratios` | Attacker ratios | `[0.10, 0.15, 0.20]` |
+| `--target-sizes` | Target set sizes | `[2, 4, 6, 8]` |
+| `--splits` | Split values | `[2, 4, 6, 8]` |
+| `--experiments` | Experiments per config | 5 |
+| `--full-scale` | Use full-scale dataset sizes | False |
+| `--n` | Override number of users | None |
+| `--processors` | Parallel processes | 4 |
+
+## Model Training
 
 ## Usage
 
@@ -33,7 +67,6 @@ python main.py --data-path dataset.csv --model attention --epochs 15
 # Save outputs to directory
 python main.py --data-path dataset.csv --model mlp --output-dir ./results
 ```
-
 ### CLI Arguments
 
 | Argument | Description | Default |

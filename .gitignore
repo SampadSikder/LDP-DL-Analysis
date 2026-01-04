@@ -86,7 +86,7 @@ checkpoints/
 # Data files
 *.csv
 *.parquet
-data/
+datasets/
 
 # Plots
 *.png
