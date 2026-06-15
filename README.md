@@ -50,7 +50,81 @@ python generate_dataset.py --output custom.csv \
 | `--n` | Override number of users | None |
 | `--processors` | Parallel processes | 4 |
 
-## Model Training
+## PCA Dataset Generation
+
+Generate LDP attack detection training data using PCA on the raw perturbed support vectors instead of hand-crafted statistical features.
+
+The script applies PCA to the per-user perturbed `support_list` matrix (shape `n × domain`) and retains components using a two-part heuristic:
+
+1. **Kaiser criterion**: keep components whose eigenvalue > 1 (meaningful on standardized data)
+2. **Variance floor**: keep enough components to explain ≥ the specified cumulative variance threshold (default 90%)
+
+The final number of components is `max(kaiser_k, variance_k)`.
+
+```bash
+# Generate with defaults
+python generate_dataset_pca.py --output dataset_pca.csv
+
+# Custom configuration
+python generate_dataset_pca.py --output pca.csv \
+    --protocols OUE OLH_Server HST_User HST_Server \
+    --epsilons 0.5 1.0 2.0 \
+    --datasets zipf emoji fire \
+    --ratios 0.10 0.15 0.20 \
+    --experiments 5 \
+    --workers 4 \
+    --inner-processors 4
+
+# Higher variance threshold with dimension cap
+python generate_dataset_pca.py --output pca_strict.csv \
+    --variance-threshold 0.95 \
+    --max-pca-dim 100
+```
+
+### PCA Dataset CLI Arguments
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--output`, `-o` | Output CSV file path | *required* |
+| `--protocols` | LDP protocols: `OUE`, `OLH`, `OLH_User`, `OLH_Server`, `HST_User`, `HST_Server` | `['OUE', 'OLH']` |
+| `--epsilons` | Privacy parameters | `[0.5, 0.7, 1.0, 1.5]` |
+| `--datasets` | Dataset types: `zipf`, `emoji`, `fire` | all three |
+| `--ratios` | Attacker ratios | `[0.10, 0.15, 0.20]` |
+| `--target-sizes` | Target set sizes | `[2, 4, 6, 8]` |
+| `--splits` | Split values | `[2, 4, 6, 8]` |
+| `--experiments` | Experiments per config | 5 |
+| `--full-scale` | Use full-scale dataset sizes | False |
+| `--n` | Override number of users | None |
+| `--domain` | Override domain size | None |
+| `--variance-threshold` | Minimum cumulative explained variance for PCA | 0.90 |
+| `--max-pca-dim` | Hard cap on PCA components (None = no cap) | None |
+| `--workers` | Outer ProcessPoolExecutor workers (OUE/HST) | 4 |
+| `--inner-processors` | Inner parallel processes per task | 4 |
+| `--append` | Append to existing output file | False |
+
+### Output CSV Format
+
+| Column | Description |
+|--------|-------------|
+| `pc_0`, `pc_1`, ... | PCA-projected feature columns |
+| `pca_dim` | Number of PCA components retained for this row |
+| `pca_variance_explained` | Cumulative variance explained |
+| `target_set_size` | Config metadata |
+| `attacker_ratio` | Config metadata |
+| `protocol` | Config metadata |
+| `splits` | Config metadata |
+| `epsilon` | Config metadata |
+| `dataset_type` | Config metadata |
+| `label` | 0 = benign, 1 = attacker |
+
+> **Note:** Different experiments may produce different numbers of PCA columns depending on the domain size and data characteristics. Each chunk is written independently, so the CSV may have varying column widths across rows. The `pca_dim` column records the actual dimensionality for each row.
+
+### Parallelism
+
+- **OUE, HST_User, HST_Server** tasks are executed in parallel via `ProcessPoolExecutor` with `--workers` controlling concurrency.
+- **OLH, OLH_User, OLH_Server** tasks run **sequentially** in the main process because OLH protocols already use inner `multiprocessing.Pool` for hash-function search and user-seed processing. Nesting process pools would cause deadlocks or excessive resource contention.
+
+
 
 ## Usage
 

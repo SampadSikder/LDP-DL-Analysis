@@ -88,7 +88,7 @@ def perturb_OUE_multi(
     num_processes: int = 4
 ) -> np.ndarray:
     """
-    Perturb data using OUE protocol with attack simulation.
+    Perturb data using OUE protocol with attack simulation (With parallel processing).
     
     Args:
         X: User data array
