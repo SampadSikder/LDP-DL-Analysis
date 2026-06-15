@@ -198,11 +198,12 @@ def apply_pca_heuristic(
     kaiser_k = int(np.sum(eigenvalues > 1.0))
     kaiser_k = max(kaiser_k, 1)  # at least 1
 
-    # Step 4: Variance floor
-    variance_k = int(np.searchsorted(cumulative_variance, variance_threshold) + 1)
-    variance_k = min(variance_k, max_components)
+    # # Step 4: Variance floor
+    # variance_k = int(np.searchsorted(cumulative_variance, variance_threshold) + 1)
+    # variance_k = min(variance_k, max_components)
 
-    k = max(kaiser_k, variance_k)
+    #k = max(kaiser_k, variance_k)
+    k = kaiser_k    
     if max_dim is not None: # Can be specified
         k = min(k, max_dim)
     k = min(k, max_components)
