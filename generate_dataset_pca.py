@@ -1,22 +1,19 @@
 #!/usr/bin/env python
 """
 Usage:
-    python generate_dataset_pca.py --output dataset_pca.csv
-    python generate_dataset_pca.py --output pca.csv --protocols OUE --epsilons 0.5 1.0 --experiments 3
+    python generate_dataset_pca.py --output dataset_pca.pt
+    python generate_dataset_pca.py --output dataset_pca.pt --protocols OUE --epsilons 0.5 1.0 --experiments 3
 """
 
 import argparse
-import math
 import os
 import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
-import pandas as pd
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
+import torch
 
 from config import (
     DEFAULT_EPSILONS,
@@ -24,195 +21,15 @@ from config import (
     DEFAULT_TARGET_SIZES,
     DEFAULT_SPLITS,
     DEFAULT_SEED,
-    DEFAULT_VARIANCE_THRESHOLD,
-    DEFAULT_MAX_PCA_DIM,
+    DEFAULT_PCA_DIM,
+    DEFAULT_KNN_K,
     DATASET_CONFIGS,
     DATASET_CONFIGS_FULL,
-    DATASET_CONFIG_COLUMNS,
 )
 from attacker_detector.data.generators import (
-    generate_zipf_dist,
-    generate_emoji_dist,
-    generate_fire_dist,
-    construct_omega,
-    build_normal_lists_from_mechanism_stochastic,
-    build_support_list_1_OUE,
-    build_support_list_1_OLH,
-    build_support_list_1_OLH_Server,
+    generate_perturbed_data,
+    build_graph_data,
 )
-from attacker_detector.data.generators.attacks import perturb_OUE_multi, HST_Server, HST_Users
-
-
-
-def get_distribution_generator(dataset_type: str):
-    """Get distribution generator function by type."""
-    generators = {
-        'zipf': generate_zipf_dist,
-        'emoji': generate_emoji_dist,
-        'fire': generate_fire_dist,
-    }
-    return generators[dataset_type]
-
-
-def generate_perturbed_data(
-    epsilon: float,
-    domain: int,
-    n: int,
-    protocol: str,
-    ratio: float,
-    target_set_size: int,
-    splits: int,
-    dataset_type: str = 'zipf',
-    h_ao: int = 1,
-    seed: int = None,
-    processors: int = 4,
-    olh_setting: str = 'server'
-) -> tuple:
-
-    # Generate user level dataset without feature extraction
-    
-    if seed is not None:
-        np.random.seed(seed)
-
-    generator = get_distribution_generator(dataset_type)
-    X, REAL_DIST = generator(n, domain, seed=seed)
-
-    target_set = set(np.random.choice(domain, size=target_set_size, replace=False))
-
-    base_mechanism = 'OLH' if protocol in ('OLH', 'OLH_User', 'OLH_Server') else protocol
-
-    # Generate ideal (non-attacked) lists for reference
-    # but kept for API consistency; could be commented out)
-    # ideal_support_list, ideal_one_list, ideal_ESTIMATE_DIST, _ = \
-    #     build_normal_lists_from_mechanism_stochastic(
-    #         epsilon=epsilon,
-    #         d=domain,
-    #         n=n,
-    #         mechanism=base_mechanism,
-    #         seed=seed if seed else 42
-    #     )
-
-    if protocol == "OLH":
-        g = int(round(math.exp(epsilon))) + 1
-        p = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
-        User_Seed = np.arange(n)
-        Y = np.zeros(n)
-
-        if olh_setting == 'user':
-            support_list, one_list, ESTIMATE_DIST, _ = \
-                build_support_list_1_OLH(
-                    domain, Y, n, User_Seed, ratio, g, target_set,
-                    p, splits, h_ao, epsilon, processor=processors
-                )
-        else:
-            support_list, one_list, ESTIMATE_DIST, _ = \
-                build_support_list_1_OLH_Server(
-                    domain, Y, n, User_Seed, ratio, g, target_set,
-                    p, splits, h_ao, epsilon, processor=processors
-                )
-
-    elif protocol == "OUE":
-        Y_data = perturb_OUE_multi(
-            X=X,
-            epsilon=epsilon,
-            domain=domain,
-            n=n,
-            target_set=target_set,
-            ratio=ratio,
-            h_ao=h_ao,
-            splits=splits,
-            num_processes=processors
-        )
-
-        support_list, one_list, ESTIMATE_DIST, _ = \
-            build_support_list_1_OUE(Y_data, n, epsilon)
-
-    elif protocol == "HST_User":
-        support_list, one_list, ESTIMATE_DIST, _ = \
-            HST_Users(
-                X=X,
-                ratio=ratio,
-                domain=domain,
-                epsilon=epsilon,
-                n=n,
-                target_set=target_set,
-                h_ao=h_ao,
-                splits=splits
-            )
-
-    elif protocol == "HST_Server":
-        support_list, one_list, ESTIMATE_DIST, _ = \
-            HST_Server(
-                X=X,
-                ratio=ratio,
-                domain=domain,
-                epsilon=epsilon,
-                n=n,
-                target_set=target_set,
-                splits=splits
-            )
-    else:
-        raise ValueError(f"Unknown protocol: {protocol}")
-
-    num_benign = int(n * (1 - ratio))
-    labels = np.zeros(n)
-    labels[num_benign:] = 1
-
-    return support_list, labels
-
-
-def apply_pca_heuristic(
-    support_list: np.ndarray,
-    variance_threshold: float = 0.90,
-    max_dim: int = None
-) -> tuple:
-    """
-    Apply PCA with Kaiser criterion + cumulative variance floor.
-
-    Steps:
-        1. Standardize support_list (zero-mean, unit-variance per column).
-        2. Fit PCA with all components.
-        3. Kaiser criterion: count components whose eigenvalue > 1.
-        4. Variance floor: count components to reach >= variance_threshold.
-        5. k = max(kaiser_k, variance_k); optionally capped at max_dim.
-        6. Project data onto the top-k components.
-
-        pca_features: (n, k) projected data
-        k: number of retained components
-        explained_variance: cumulative explained variance ratio for the k components
-    """
-    n_samples, n_features = support_list.shape
-
-    max_components = min(n_samples, n_features)
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(support_list.astype(np.float64))
-
-    pca_full = PCA(n_components=max_components)
-    pca_full.fit(X_scaled)
-
-    eigenvalues = pca_full.explained_variance_
-    cumulative_variance = np.cumsum(pca_full.explained_variance_ratio_)
-
-    # Step 3: Kaiser criterion — eigenvalue > 1
-    kaiser_k = int(np.sum(eigenvalues > 1.0))
-    kaiser_k = max(kaiser_k, 1)  # at least 1
-
-    # # Step 4: Variance floor
-    # variance_k = int(np.searchsorted(cumulative_variance, variance_threshold) + 1)
-    # variance_k = min(variance_k, max_components)
-
-    #k = max(kaiser_k, variance_k)
-    k = kaiser_k    
-    if max_dim is not None: # Can be specified
-        k = min(k, max_dim)
-    k = min(k, max_components)
-
-    pca_features = pca_full.transform(X_scaled)[:, :k]
-    explained = float(cumulative_variance[k - 1])
-
-    return pca_features, k, explained
-
 
 
 def build_tasks(args) -> list:
@@ -260,8 +77,8 @@ def build_tasks(args) -> list:
                                     'seed': seed,
                                     'inner_processors': args.inner_processors,
                                     'olh_setting': olh_setting,
-                                    'variance_threshold': args.variance_threshold,
-                                    'max_pca_dim': args.max_pca_dim,
+                                    'pca_dim': args.pca_dim,
+                                    'knn_k': args.knn_k,
                                     'exp_i': exp_i,
                                     'desc': (
                                         f"ε={epsilon}, {dataset_type}, {protocol}, "
@@ -273,13 +90,12 @@ def build_tasks(args) -> list:
     return tasks
 
 
-
 def run_one_task(task: dict) -> dict:
     """
     Execute one experiment configuration:
       1. Generate perturbed data
-      2. Apply PCA heuristic
-      3. Build result dict with DataFrame chunk
+      2. Build graph data (PCA, kNN, centralities, densities)
+      3. Return result dict with PyG Data object
     """
     try:
         support_list, labels = generate_perturbed_data(
@@ -297,35 +113,31 @@ def run_one_task(task: dict) -> dict:
             olh_setting=task['olh_setting'],
         )
 
-        pca_features, pca_dim, explained_var = apply_pca_heuristic(
-            support_list,
-            variance_threshold=task['variance_threshold'],
-            max_dim=task['max_pca_dim'],
+        metadata = {
+            'protocol': task['protocol_label'],
+            'dataset_type': task['dataset_type'],
+            'ratio': task['ratio'],
+            'target_set_size': task['target_set_size'],
+            'splits': task['splits'],
+        }
+
+        #Final Feature vector
+        data_obj = build_graph_data(
+            support_list=support_list,
+            labels=labels,
+            epsilon=task['epsilon'],
+            pca_dim=task['pca_dim'],
+            knn_k=task['knn_k'],
+            metadata=metadata
         )
-
-        num_users = len(labels)
-        num_attackers = int(labels.sum())
-
-        pc_cols = [f'pc_{i}' for i in range(pca_dim)]
-        df_pca = pd.DataFrame(pca_features, columns=pc_cols)
-
-        df_pca['pca_dim'] = pca_dim
-        df_pca['pca_variance_explained'] = explained_var
-        df_pca['target_set_size'] = task['target_set_size']
-        df_pca['attacker_ratio'] = task['ratio']
-        df_pca['protocol'] = task['protocol_label']
-        df_pca['splits'] = task['splits']
-        df_pca['epsilon'] = task['epsilon']
-        df_pca['dataset_type'] = task['dataset_type']
-        df_pca['label'] = labels
 
         return {
             'ok': True,
-            'df': df_pca,
-            'pca_dim': pca_dim,
-            'explained_var': explained_var,
-            'num_users': num_users,
-            'num_attackers': num_attackers,
+            'data': data_obj,
+            'pca_dim': task['pca_dim'],
+            'explained_var': data_obj.pca_variance_explained,
+            'num_users': len(labels),
+            'num_attackers': int(labels.sum()),
             'desc': task['desc'],
         }
 
@@ -341,7 +153,7 @@ def run_one_task(task: dict) -> dict:
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Generate LDP attack detection dataset with PCA features',
+        description='Generate LDP attack detection dataset with Graph features',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -349,7 +161,7 @@ def parse_args():
         '--output', '-o',
         type=str,
         required=True,
-        help='Output CSV file path'
+        help='Output .pt file path for the graph dataset'
     )
 
     parser.add_argument(
@@ -440,19 +252,18 @@ def parse_args():
         help='Append to existing output file instead of overwriting'
     )
 
-
     parser.add_argument(
-        '--variance-threshold',
-        type=float,
-        default=DEFAULT_VARIANCE_THRESHOLD,
-        help='Minimum cumulative explained variance for PCA component selection'
+        '--pca-dim',
+        type=int,
+        default=DEFAULT_PCA_DIM,
+        help='Number of PCA components to retain'
     )
 
     parser.add_argument(
-        '--max-pca-dim',
+        '--knn-k',
         type=int,
-        default=DEFAULT_MAX_PCA_DIM,
-        help='Hard cap on number of PCA components (None = no cap)'
+        default=DEFAULT_KNN_K,
+        help='Number of neighbors for kNN graph'
     )
 
     parser.add_argument(
@@ -470,7 +281,6 @@ def parse_args():
     )
 
     return parser.parse_args()
-
 
 
 def main():
@@ -501,7 +311,7 @@ def main():
     total_runs = len(tasks)
 
     print("=" * 80)
-    print("LDP Attack Detection PCA Dataset Generator (Parallel)")
+    print("LDP Attack Detection Graph Dataset Generator")
     print("=" * 80)
     print(f"Output: {args.output}")
     print(f"Protocols: {args.protocols}")
@@ -517,27 +327,23 @@ def main():
     print(f"  Sequential tasks (OLH):   {len(sequential_tasks)}")
     print(f"Outer workers: {args.workers}")
     print(f"Inner processors per task: {args.inner_processors}")
-    print(f"Variance threshold: {args.variance_threshold}")
-    print(f"Max PCA dim: {args.max_pca_dim or 'None (no cap)'}")
+    print(f"PCA Dimension: {args.pca_dim}")
+    print(f"kNN Neighbors: {args.knn_k}")
     print("=" * 80)
 
     total_users = 0
     total_attackers = 0
     num_success = 0
     num_failed = 0
-    all_pca_dims = []
-    all_results = []  # Collect all successful result DataFrames
+    all_graphs = []
 
     def _handle_result(result):
-        """Process a single task result: accumulate stats and collect DataFrame."""
         nonlocal total_users, total_attackers, num_success, num_failed
 
         if result['ok']:
-            all_results.append(result['df'])
-
+            all_graphs.append(result['data'])
             total_users += result['num_users']
             total_attackers += result['num_attackers']
-            all_pca_dims.append(result['pca_dim'])
             num_success += 1
 
             print(
@@ -568,49 +374,29 @@ def main():
             result = run_one_task(task)
             _handle_result(result)
 
-    # --- Pad and write ---
-    if all_results:
-        max_pca_dim = max(all_pca_dims)
-        print(f"\nPadding all chunks to {max_pca_dim} PCA columns...")
-
-        meta_columns = [
-            'pca_dim', 'pca_variance_explained',
-            'target_set_size', 'attacker_ratio', 'protocol',
-            'splits', 'epsilon', 'dataset_type', 'label'
-        ]
-        all_pc_cols = [f'pc_{i}' for i in range(max_pca_dim)]
-        final_columns = all_pc_cols + meta_columns
-
-        # Pad each DataFrame to uniform width and concatenate
-        padded_dfs = []
-        for df_chunk in all_results:
-            # Add any missing pc columns as zeros
-            for col in all_pc_cols:
-                if col not in df_chunk.columns:
-                    df_chunk[col] = 0.0
-            padded_dfs.append(df_chunk[final_columns])
-
-        df_final = pd.concat(padded_dfs, ignore_index=True)
-
-        # Write (or append) to CSV
+    # Get all graphs from sequential and parallel and load to graph
+    if all_graphs:
         if args.append and os.path.exists(args.output) and os.path.getsize(args.output) > 0:
-            df_final.to_csv(args.output, mode='a', header=False, index=False)
-        else:
-            df_final.to_csv(args.output, index=False)
+            try:
+                existing_graphs = torch.load(args.output, weights_only=False)
+                if isinstance(existing_graphs, list):
+                    all_graphs = existing_graphs + all_graphs
+                    print(f"Loaded {len(existing_graphs)} existing graphs from {args.output}")
+                else:
+                    print(f"Warning: existing output {args.output} is not a list. Overwriting.")
+            except Exception as e:
+                print(f"Error loading existing file {args.output}: {e}. Overwriting.")
 
-        print(f"Wrote {len(df_final):,} rows to {args.output}")
+        torch.save(all_graphs, args.output)
+        print(f"Wrote {len(all_graphs)} graphs to {args.output}")
 
     print("\n" + "=" * 80)
-    print("PCA Dataset Generation Complete")
+    print("Graph Dataset Generation Complete")
     print("=" * 80)
     print(f"Successful runs: {num_success}")
     print(f"Failed runs: {num_failed}")
-    print(f"Total users written: {total_users:,}")
-    print(f"Total attackers written: {total_attackers:,}")
-
-    if all_pca_dims:
-        print(f"PCA dimensions: min={min(all_pca_dims)}, max={max(all_pca_dims)}, "
-              f"mean={np.mean(all_pca_dims):.1f}")
+    print(f"Total users: {total_users:,}")
+    print(f"Total attackers: {total_attackers:,}")
 
     if total_users > 0:
         benign = total_users - total_attackers
@@ -621,7 +407,6 @@ def main():
     else:
         print("ERROR: No data generated.")
         sys.exit(1)
-
 
 
 if __name__ == '__main__':

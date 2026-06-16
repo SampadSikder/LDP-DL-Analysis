@@ -17,7 +17,15 @@ conda env create -f environment.yml
 conda activate attacker-detector
 ```
 
+## Required Datasets
+
+To generate LDP distributions, the real dataset files must be placed in a `datasets` folder in the project root:
+- `datasets/zipf.npy` — Zipf dataset
+- `datasets/emoji.npy` — Emoji dataset
+- `datasets/fire.csv` — Fire dataset (must contain `Unit_ID` column)
+
 ## Dataset Generation
+
 
 Generate LDP attack detection training data:
 
@@ -50,23 +58,18 @@ python generate_dataset.py --output custom.csv \
 | `--n` | Override number of users | None |
 | `--processors` | Parallel processes | 4 |
 
-## PCA Dataset Generation
+## PCA Graph Dataset Generation
 
-Generate LDP attack detection training data using PCA on the raw perturbed support vectors instead of hand-crafted statistical features.
+Generate LDP attack detection training data using PCA and kNN graph extraction, outputting a list of PyTorch Geometric `Data` objects.
 
-The script applies PCA to the per-user perturbed `support_list` matrix (shape `n × domain`) and retains components using a two-part heuristic:
-
-1. **Kaiser criterion**: keep components whose eigenvalue > 1 (meaningful on standardized data)
-2. **Variance floor**: keep enough components to explain ≥ the specified cumulative variance threshold (default 90%)
-
-The final number of components is `max(kaiser_k, variance_k)`.
+The script applies PCA to the per-user perturbed `support_list` matrix (shape `n × domain`) and retains a fixed number of components (default: 16). A kNN graph is then built using these PCA features, and density and influence graph features are extracted for each user node.
 
 ```bash
 # Generate with defaults
-python generate_dataset_pca.py --output dataset_pca.csv
+python generate_dataset_pca.py --output dataset_pca.pt
 
 # Custom configuration
-python generate_dataset_pca.py --output pca.csv \
+python generate_dataset_pca.py --output pca.pt \
     --protocols OUE OLH_Server HST_User HST_Server \
     --epsilons 0.5 1.0 2.0 \
     --datasets zipf emoji fire \
@@ -74,18 +77,13 @@ python generate_dataset_pca.py --output pca.csv \
     --experiments 5 \
     --workers 4 \
     --inner-processors 4
-
-# Higher variance threshold with dimension cap
-python generate_dataset_pca.py --output pca_strict.csv \
-    --variance-threshold 0.95 \
-    --max-pca-dim 100
 ```
 
-### PCA Dataset CLI Arguments
+### PCA Graph Dataset CLI Arguments
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--output`, `-o` | Output CSV file path | *required* |
+| `--output`, `-o` | Output `.pt` file path | *required* |
 | `--protocols` | LDP protocols: `OUE`, `OLH`, `OLH_User`, `OLH_Server`, `HST_User`, `HST_Server` | `['OUE', 'OLH']` |
 | `--epsilons` | Privacy parameters | `[0.5, 0.7, 1.0, 1.5]` |
 | `--datasets` | Dataset types: `zipf`, `emoji`, `fire` | all three |
@@ -96,33 +94,45 @@ python generate_dataset_pca.py --output pca_strict.csv \
 | `--full-scale` | Use full-scale dataset sizes | False |
 | `--n` | Override number of users | None |
 | `--domain` | Override domain size | None |
-| `--variance-threshold` | Minimum cumulative explained variance for PCA | 0.90 |
-| `--max-pca-dim` | Hard cap on PCA components (None = no cap) | None |
+| `--pca-dim` | Number of PCA components to retain | 16 |
+| `--knn-k` | Number of neighbors for kNN graph | 10 |
 | `--workers` | Outer ProcessPoolExecutor workers (OUE/HST) | 4 |
 | `--inner-processors` | Inner parallel processes per task | 4 |
 | `--append` | Append to existing output file | False |
 
-### Output CSV Format
+### Output `.pt` Format
 
-| Column | Description |
-|--------|-------------|
-| `pc_0`, `pc_1`, ... | PCA-projected feature columns |
-| `pca_dim` | Number of PCA components retained for this row |
-| `pca_variance_explained` | Cumulative variance explained |
-| `target_set_size` | Config metadata |
-| `attacker_ratio` | Config metadata |
-| `protocol` | Config metadata |
-| `splits` | Config metadata |
-| `epsilon` | Config metadata |
-| `dataset_type` | Config metadata |
-| `label` | 0 = benign, 1 = attacker |
+The output file is a list of PyTorch Geometric `torch_geometric.data.Data` objects. Each object represents an experiment run:
+```python
+Data(
+    x=FloatTensor[n, 24],        # Node features
+    edge_index=LongTensor[2, E],   # Symmetric kNN edges
+    y=FloatTensor[n],            # Labels: 0 = benign, 1 = attacker
+    # Graph-level metadata:
+    epsilon=float,
+    protocol=str,
+    dataset_type=str,
+    ratio=float,
+    target_set_size=int,
+    splits=int,
+    pca_variance_explained=float
+)
+```
 
-> **Note:** Different experiments may produce different numbers of PCA columns depending on the domain size and data characteristics. Each chunk is written independently, so the CSV may have varying column widths across rows. The `pca_dim` column records the actual dimensionality for each row.
+### Node Feature Composition (24 Dims)
+
+| Feature Block | Dims | Description |
+|--------------|------|-------------|
+| PCA coordinates | 16 (or `pca_dim`) | `pc_0` ... `pc_15` |
+| Density features | 4 | `avg_knn_dist`, `local_density`, `relative_density`, `knn_dist_std` |
+| Influence features | 3 | `in_degree`, `degree_centrality`, `hub_score` |
+| Epsilon | 1 | Epsilon value (broadcasted to all nodes) |
 
 ### Parallelism
 
 - **OUE, HST_User, HST_Server** tasks are executed in parallel via `ProcessPoolExecutor` with `--workers` controlling concurrency.
 - **OLH, OLH_User, OLH_Server** tasks run **sequentially** in the main process because OLH protocols already use inner `multiprocessing.Pool` for hash-function search and user-seed processing. Nesting process pools would cause deadlocks or excessive resource contention.
+
 
 
 
