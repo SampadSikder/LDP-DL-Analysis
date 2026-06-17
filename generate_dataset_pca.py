@@ -47,6 +47,8 @@ def build_tasks(args) -> list:
                 for ratio in args.ratios:
                     for target_size in args.target_sizes:
                         for splits in args.splits:
+                            if splits > target_size:
+                                continue
                             for exp_i in range(args.experiments):
                                 # Determine OLH setting
                                 if protocol == "OLH_User":
@@ -356,17 +358,68 @@ def main():
             print(f'[FAIL] {result["desc"]} | error={result["error"]}')
             print(result['traceback'])
 
-    if parallel_tasks:
-        print(f"\n--- Phase 1: Processing {len(parallel_tasks)} OUE/HST tasks in parallel ---")
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = {
-                executor.submit(run_one_task, task): task
-                for task in parallel_tasks
-            }
+    # Save interval: persist accumulated graphs to disk every N completed tasks
+    SAVE_EVERY = 500
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Parallel (OUE/HST)"):
-                result = future.result()
-                _handle_result(result)
+    def _save_to_disk():
+        """Append accumulated graphs to the output .pt file and free memory."""
+        nonlocal all_graphs
+        if not all_graphs:
+            return 0
+        # Load existing graphs from the output file if present
+        if os.path.exists(args.output) and os.path.getsize(args.output) > 0:
+            try:
+                existing = torch.load(args.output, weights_only=False)
+                if isinstance(existing, list):
+                    all_graphs = existing + all_graphs
+            except Exception:
+                pass
+        torch.save(all_graphs, args.output)
+        saved_count = len(all_graphs)
+        all_graphs = []
+        return saved_count
+
+    if parallel_tasks:
+        # Disable inner multiprocessing for parallel tasks to avoid nested.
+        for t in parallel_tasks:
+            t['inner_processors'] = 1
+
+        print(f"\n--- Phase 1: Processing {len(parallel_tasks)} OUE/HST tasks in parallel ---")
+
+        # Process in batches to limit memory usage
+        batch_size = max(SAVE_EVERY, args.workers * 50)
+        for batch_start in range(0, len(parallel_tasks), batch_size):
+            batch = parallel_tasks[batch_start:batch_start + batch_size]
+            batch_end = min(batch_start + batch_size, len(parallel_tasks))
+            print(f"\n  Batch [{batch_start+1}-{batch_end}] of {len(parallel_tasks)}")
+
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                futures = {
+                    executor.submit(run_one_task, task): task
+                    for task in batch
+                }
+
+                for future in tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc=f"Parallel (OUE/HST) [{batch_start+1}-{batch_end}]"
+                ):
+                    try:
+                        result = future.result()
+                        _handle_result(result)
+                    except Exception as e:
+                        task_info = futures[future]
+                        num_failed += 1
+                        print(f'[CRASH] {task_info["desc"]} | Worker killed: {e}')
+
+                    # Periodic save to disk to free memory
+                    if len(all_graphs) >= SAVE_EVERY:
+                        n_saved = _save_to_disk()
+                        print(f"  [SAVED] {n_saved} graphs to {args.output}")
+
+            if all_graphs:
+                n_saved = _save_to_disk()
+                print(f"  [SAVED] {n_saved} graphs to {args.output}")
 
     if sequential_tasks:
         print(f"\n--- Phase 2: Processing {len(sequential_tasks)} OLH tasks sequentially ---")
@@ -374,27 +427,28 @@ def main():
             result = run_one_task(task)
             _handle_result(result)
 
-    # Get all graphs from sequential and parallel and load to graph
-    if all_graphs:
-        if args.append and os.path.exists(args.output) and os.path.getsize(args.output) > 0:
-            try:
-                existing_graphs = torch.load(args.output, weights_only=False)
-                if isinstance(existing_graphs, list):
-                    all_graphs = existing_graphs + all_graphs
-                    print(f"Loaded {len(existing_graphs)} existing graphs from {args.output}")
-                else:
-                    print(f"Warning: existing output {args.output} is not a list. Overwriting.")
-            except Exception as e:
-                print(f"Error loading existing file {args.output}: {e}. Overwriting.")
+            if len(all_graphs) >= SAVE_EVERY:
+                n_saved = _save_to_disk()
+                print(f"  [SAVED] {n_saved} graphs to {args.output}")
 
-        torch.save(all_graphs, args.output)
-        print(f"Wrote {len(all_graphs)} graphs to {args.output}")
+    # Final save for any remaining graphs in memory
+    if all_graphs:
+        n_saved = _save_to_disk()
+        print(f"Saved final {n_saved} graphs to {args.output}")
+
+    if os.path.exists(args.output) and os.path.getsize(args.output) > 0:
+        final_graphs = torch.load(args.output, weights_only=False)
+        total_saved = len(final_graphs) if isinstance(final_graphs, list) else 0
+        del final_graphs
+    else:
+        total_saved = 0
 
     print("\n" + "=" * 80)
     print("Graph Dataset Generation Complete")
     print("=" * 80)
     print(f"Successful runs: {num_success}")
     print(f"Failed runs: {num_failed}")
+    print(f"Total graphs saved: {total_saved}")
     print(f"Total users: {total_users:,}")
     print(f"Total attackers: {total_attackers:,}")
 
@@ -405,7 +459,7 @@ def main():
         print(f"Saved to: {args.output}")
         print(f"File size: {os.path.getsize(args.output) / (1024 * 1024):.2f} MB")
     else:
-        print("ERROR: No data generated.")
+        print("WARNING: No data generated.")
         sys.exit(1)
 
 

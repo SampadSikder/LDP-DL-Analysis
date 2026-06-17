@@ -249,9 +249,11 @@ def process_attacker(i, n, ratio, target_set, g, domain, splits, h_ao, e, K_valu
           omega_probs = construct_omega(e, domain, 'OLH_User')
           num_map_AO = np.random.choice(range(domain), p=omega_probs)
         non_target_ones = num_map_AO - k
+        non_target_ones = max(0, min(non_target_ones, len(non_target_indices)))
         # Each attacker finds their optimal hash function
         '''best_vector, target_map, diff  = uniform_sampling_best_vector(
             splits_list, g, domain, num_map_AO, num_samples)'''
+        k = min(k, len(splits_list))
         target_indices = np.random.choice(list(splits_list), size=k, replace=False)
         non_target_indices = list(set(range(domain)) - set(splits_list))
         non_target_selected = np.random.choice(non_target_indices, size=non_target_ones, replace=False)
@@ -635,8 +637,9 @@ def HST_Users(X, ratio, domain, epsilon, n, target_set, h_ao, splits):
         remaining_set = list(set(range(domain)) - set(splits_list))
         diff = int(average_1_num - len(splits_list))
         diff_AO = random.randint(diff - h_ao, diff + h_ao)
+        diff_AO = max(0, min(diff_AO, len(remaining_set)))
         #print(f'attacker:{i}, exp1:{average_1_num}, h_ao:{h_ao}, splits:{splits}')
-        if diff_AO > 0 and len(remaining_set) >= diff:
+        if diff_AO > 0 and len(remaining_set) >= diff_AO:
             random_numbers = random.sample(remaining_set, diff_AO)
             local_user_data[random_numbers] = 1
         idx = start_idx + i

@@ -52,6 +52,7 @@ def generate_perturbed_data(
     generator = get_distribution_generator(dataset_type)
     X, REAL_DIST = generator(n, domain, seed=seed)
 
+    target_set_size = min(target_set_size, domain)
     target_set = set(np.random.choice(domain, size=target_set_size, replace=False))
 
     if protocol == "OLH":
