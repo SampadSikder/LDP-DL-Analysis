@@ -150,7 +150,7 @@ def build_knn_graph(pca_features: np.ndarray, k: int = 10) -> tuple:
     n = pca_features.shape[0]
     actual_k = min(k, n - 1)
 
-    nbrs = NearestNeighbors(n_neighbors=actual_k + 1, algorithm='auto').fit(pca_features)
+    nbrs = NearestNeighbors(n_neighbors=actual_k + 1, algorithm='auto').fit(pca_features) # Default metric L2 distance
     distances, indices = nbrs.kneighbors(pca_features)
 
     # Filter out self-loops for each node
