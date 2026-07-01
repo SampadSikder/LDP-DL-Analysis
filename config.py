@@ -72,3 +72,19 @@ DATASET_CONFIG_COLUMNS = [
 
 DATASET_TYPES = ['zipf', 'emoji', 'fire']
 
+DEFAULT_PCA_DIM = 16
+DEFAULT_KNN_K = 10
+
+DEFAULT_GNN_HIDDEN_DIM = 64
+DEFAULT_GNN_NUM_HEADS = 4
+DEFAULT_GNN_LAMBDA_AGG = 0.1
+DEFAULT_GNN_PATIENCE = 10
+DEFAULT_GNN_K_FOLDS = 5
+DEFAULT_GNN_BATCH_SIZE = 32
+DEFAULT_GNN_INPUT_DIM = 24  # 16 PCA + 4 density + 3 influence + 1 epsilon
+
+DEFAULT_GNN_HP_GRID = {
+    'lambda_agg':  [0.05, 0.1, 0.2],
+    'num_heads':   [2, 4, 8],
+    'init_method': ['xavier_uniform', 'kaiming', 'orthogonal'],
+}

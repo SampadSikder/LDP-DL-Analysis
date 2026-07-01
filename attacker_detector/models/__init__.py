@@ -3,6 +3,8 @@
 from .mlp import RobustAttackerDetector
 from .gan import AttackerDiscriminator
 from .attention import AttentionAttackerDetector, MultiHeadAttention
+from .gat import GATAttackerDetector
+from .graphsage import GraphSAGEAttackerDetector
 
 
 def get_model(model_type: str, input_dim: int, **kwargs):
@@ -10,9 +12,9 @@ def get_model(model_type: str, input_dim: int, **kwargs):
     Factory function to create models by type.
     
     Args:
-        model_type: Type of model ('mlp', 'gan', 'attention')
+        model_type: Type of model ('mlp', 'gan', 'attention', 'gat', 'graphsage')
         input_dim: Number of input features
-        **kwargs: Additional model-specific arguments (e.g., dropout_rate)
+        **kwargs: Additional model-specific arguments (e.g., dropout_rate, hidden_dim, num_heads)
     
     Returns:
         Instantiated PyTorch model
@@ -24,6 +26,8 @@ def get_model(model_type: str, input_dim: int, **kwargs):
         'mlp': RobustAttackerDetector,
         'gan': AttackerDiscriminator,
         'attention': AttentionAttackerDetector,
+        'gat': GATAttackerDetector,
+        'graphsage': GraphSAGEAttackerDetector,
     }
     
     if model_type not in models:
@@ -35,4 +39,9 @@ def get_model(model_type: str, input_dim: int, **kwargs):
     return models[model_type](input_dim, **kwargs)
 
 
-__all__ = ['RobustAttackerDetector', 'AttackerDiscriminator', 'AttentionAttackerDetector', 'MultiHeadAttention', 'get_model']
+__all__ = [
+    'RobustAttackerDetector', 'AttackerDiscriminator',
+    'AttentionAttackerDetector', 'MultiHeadAttention',
+    'GATAttackerDetector', 'GraphSAGEAttackerDetector',
+    'get_model',
+]
