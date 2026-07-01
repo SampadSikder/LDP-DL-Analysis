@@ -246,18 +246,29 @@ python main_gnn.py \
     --val-ratio 0.2 \
     --output-dir ./results_hp
 
-# CV/HP search only
+# Direct train + test (no CV, no HP search)
+python main_gnn.py \
+    --data-path dataset_pca.pt \
+    --model gat \
+    --epochs 50 \
+    --batch-size 4 \
+    --test-ratio 0.2 \
+    --val-ratio 0.2 \
+    --output-dir ./results
+
+# k-fold CV for validation only (no HP search)
 python main_gnn.py \
     --data-path dataset_pca.pt \
     --model gat \
     --k-folds 5 \
-    --cv-only \
+    --no-hp-search \
+    --batch-size 4 \
     --test-ratio 0.2 \
     --val-ratio 0.2 \
     --output-dir ./results_cv_only
 ```
 
-When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) × `init_method` combinations. The best config by mean validation F1 is selected and used for final training. Use `--cv-only` to skip final training and only output CV results.
+When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) × `init_method` combinations by default. The best config by mean validation F1 is selected and used for final training. Use `--no-hp-search` to skip the grid search and use CLI params directly. Use `--cv-only` to skip final training and only output CV results.
 
 ### CLI Arguments
 
@@ -280,6 +291,7 @@ When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) 
 | `--hp-num-heads` | Attention heads to search (GAT only) | `[2, 4, 8]` |
 | `--hp-init-method` | Weight init methods to search | `[xavier_uniform, kaiming, orthogonal]` |
 | `--cv-only` | Run only CV / HP search, skip final training + test | False |
+| `--no-hp-search` | Skip HP grid search; use CLI params directly | False |
 | `--test-ratio` | Fraction of graphs for test set | 0.15 |
 | `--val-ratio` | Fraction of graphs for validation set | 0.15 |
 | `--seed` | Random seed | 42 |

@@ -157,6 +157,12 @@ def parse_args():
         default=False,
         help='Run only CV / HP search and skip final training + test evaluation',
     )
+    parser.add_argument(
+        '--no-hp-search',
+        action='store_true',
+        default=False,
+        help='Skip HP grid search; use CLI params directly for CV and final training',
+    )
 
     parser.add_argument(
         '--test-ratio',
@@ -314,63 +320,86 @@ def main():
     if args.k_folds > 0:
         model_class = type(get_model(args.model, **model_kwargs))
 
-        # Build search grid: use --hp-* flags if provided, else defaults
-        hp_grid = {}
-        if args.hp_lambda_agg is not None:
-            hp_grid['lambda_agg'] = args.hp_lambda_agg
-        elif 'lambda_agg' in DEFAULT_GNN_HP_GRID:
-            hp_grid['lambda_agg'] = DEFAULT_GNN_HP_GRID['lambda_agg']
+        if args.no_hp_search:
+            # Plain k-fold CV with fixed CLI params (no grid search)
+            cv_results = run_k_fold_cv(
+                model_class=model_class,
+                model_kwargs=model_kwargs,
+                dataset_loader=dataset,
+                n_folds=args.k_folds,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.lr,
+                lambda_agg=args.lambda_agg,
+                patience=args.patience,
+                init_method=args.init_method,
+                model_type=args.model,
+                device=device,
+                seed=args.seed,
+            )
 
-        if args.model == 'gat':
-            if args.hp_num_heads is not None:
-                hp_grid['num_heads'] = args.hp_num_heads
-            elif 'num_heads' in DEFAULT_GNN_HP_GRID:
-                hp_grid['num_heads'] = DEFAULT_GNN_HP_GRID['num_heads']
+            if args.output_dir:
+                os.makedirs(args.output_dir, exist_ok=True)
+                cv_df = pd.DataFrame(cv_results['fold_results'])
+                cv_path = os.path.join(args.output_dir, 'cv_results.csv')
+                cv_df.to_csv(cv_path, index=False)
+                print(f"\nCV results saved to: {cv_path}")
 
-        if args.hp_init_method is not None:
-            hp_grid['init_method'] = args.hp_init_method
-        elif 'init_method' in DEFAULT_GNN_HP_GRID:
-            hp_grid['init_method'] = DEFAULT_GNN_HP_GRID['init_method']
+        else:
+            # HP grid search via k-fold CV
+            hp_grid = {}
+            if args.hp_lambda_agg is not None:
+                hp_grid['lambda_agg'] = args.hp_lambda_agg
+            elif 'lambda_agg' in DEFAULT_GNN_HP_GRID:
+                hp_grid['lambda_agg'] = DEFAULT_GNN_HP_GRID['lambda_agg']
 
-        search_results = run_hp_search_cv(
-            model_class=model_class,
-            base_model_kwargs=model_kwargs,
-            dataset_loader=dataset,
-            hp_grid=hp_grid,
-            n_folds=args.k_folds,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            patience=args.patience,
-            init_method=args.init_method,
-            model_type=args.model,
-            device=device,
-            seed=args.seed,
-            base_learning_rate=args.lr,
-            base_lambda_agg=args.lambda_agg,
-        )
+            if args.model == 'gat':
+                if args.hp_num_heads is not None:
+                    hp_grid['num_heads'] = args.hp_num_heads
+                elif 'num_heads' in DEFAULT_GNN_HP_GRID:
+                    hp_grid['num_heads'] = DEFAULT_GNN_HP_GRID['num_heads']
 
-        best_config = search_results['best_config']
+            if args.hp_init_method is not None:
+                hp_grid['init_method'] = args.hp_init_method
+            elif 'init_method' in DEFAULT_GNN_HP_GRID:
+                hp_grid['init_method'] = DEFAULT_GNN_HP_GRID['init_method']
 
-        # Apply best config to final training
-        best_lambda_agg = best_config.get('lambda_agg', args.lambda_agg)
-        best_init_method = best_config.get('init_method', args.init_method)
-        if 'num_heads' in best_config and args.model == 'gat':
-            best_model_kwargs['num_heads'] = best_config['num_heads']
+            search_results = run_hp_search_cv(
+                model_class=model_class,
+                base_model_kwargs=model_kwargs,
+                dataset_loader=dataset,
+                hp_grid=hp_grid,
+                n_folds=args.k_folds,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                patience=args.patience,
+                init_method=args.init_method,
+                model_type=args.model,
+                device=device,
+                seed=args.seed,
+                base_learning_rate=args.lr,
+                base_lambda_agg=args.lambda_agg,
+            )
 
-        if args.output_dir:
-            os.makedirs(args.output_dir, exist_ok=True)
+            best_config = search_results['best_config']
 
-            # Save per-config search summary
-            search_df = pd.DataFrame(search_results['all_results'])
-            search_path = os.path.join(args.output_dir, 'hp_search_results.csv')
-            search_df.to_csv(search_path, index=False)
-            print(f"\nHP search results saved to: {search_path}")
+            best_lambda_agg = best_config.get('lambda_agg', args.lambda_agg)
+            best_init_method = best_config.get('init_method', args.init_method)
+            if 'num_heads' in best_config and args.model == 'gat':
+                best_model_kwargs['num_heads'] = best_config['num_heads']
 
-            # Save best config's fold-level results
-            cv_df = pd.DataFrame(search_results['best_cv_results']['fold_results'])
-            cv_path = os.path.join(args.output_dir, 'cv_results.csv')
-            cv_df.to_csv(cv_path, index=False)
-            print(f"Best config CV results saved to: {cv_path}")
+            if args.output_dir:
+                os.makedirs(args.output_dir, exist_ok=True)
+
+                search_df = pd.DataFrame(search_results['all_results'])
+                search_path = os.path.join(args.output_dir, 'hp_search_results.csv')
+                search_df.to_csv(search_path, index=False)
+                print(f"\nHP search results saved to: {search_path}")
+
+                cv_df = pd.DataFrame(search_results['best_cv_results']['fold_results'])
+                cv_path = os.path.join(args.output_dir, 'cv_results.csv')
+                cv_df.to_csv(cv_path, index=False)
+                print(f"Best config CV results saved to: {cv_path}")
 
     if args.cv_only:
         print("\n--cv-only set, skipping final training and test evaluation.")
