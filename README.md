@@ -257,7 +257,7 @@ python main_gnn.py \
     --output-dir ./results_cv_only
 ```
 
-When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) combinations. The best config by mean validation F1 is selected and used for final training. Use `--cv-only` to skip final training and only output CV results.
+When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) × `init_method` combinations. The best config by mean validation F1 is selected and used for final training. Use `--cv-only` to skip final training and only output CV results.
 
 ### CLI Arguments
 
@@ -276,8 +276,9 @@ When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) 
 | `--patience` | Early stopping patience (epochs without val F1 improvement) | 10 |
 | `--init-method` | Weight initialization: `xavier_uniform`, `kaiming`, `orthogonal`, `default` | `xavier_uniform` |
 | `--k-folds` | Number of k-fold CV folds (0 = skip CV) | 0 |
-| `--hp-lambda-agg` | Lambda values to search (e.g. `0.05 0.1 0.2`) | `[0.05, 0.1, 0.2]` |
-| `--hp-num-heads` | Attention heads to search (GAT only, e.g. `2 4 8`) | `[2, 4, 8]` |
+| `--hp-lambda-agg` | Lambda values to search | `[0.05, 0.1, 0.2]` |
+| `--hp-num-heads` | Attention heads to search (GAT only) | `[2, 4, 8]` |
+| `--hp-init-method` | Weight init methods to search | `[xavier_uniform, kaiming, orthogonal]` |
 | `--cv-only` | Run only CV / HP search, skip final training + test | False |
 | `--test-ratio` | Fraction of graphs for test set | 0.15 |
 | `--val-ratio` | Fraction of graphs for validation set | 0.15 |

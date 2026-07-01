@@ -515,8 +515,9 @@ def run_hp_search_cv(
     with the highest mean validation F1 across folds.
 
     Searchable keys in hp_grid:
-        - 'lambda_agg':  list of floats
-        - 'num_heads':   list of ints (GAT only)
+        - 'lambda_agg':   list of floats
+        - 'num_heads':    list of ints (GAT only)
+        - 'init_method':  list of strs
 
     Args:
         model_class: Model class (e.g. GATAttackerDetector).
@@ -527,7 +528,7 @@ def run_hp_search_cv(
         epochs: Max epochs per fold.
         batch_size: Graphs per batch.
         patience: Early stopping patience.
-        init_method: Weight initialization method.
+        init_method: Fallback weight initialization if not in grid.
         model_type: 'gat' or 'graphsage'.
         device: Torch device.
         seed: Random seed.
@@ -578,8 +579,8 @@ def run_hp_search_cv(
         # Training params for this config
         lr = base_learning_rate
         lam = config.get('lambda_agg', base_lambda_agg)
+        init = config.get('init_method', init_method)
 
-        # Need to re-resolve model_class if hidden_dim changed
         cv_results = run_k_fold_cv(
             model_class=model_class,
             model_kwargs=model_kwargs,
@@ -590,7 +591,7 @@ def run_hp_search_cv(
             learning_rate=lr,
             lambda_agg=lam,
             patience=patience,
-            init_method=init_method,
+            init_method=init,
             model_type=model_type,
             device=device,
             seed=seed,

@@ -144,6 +144,14 @@ def parse_args():
         help='Number of attention heads to search (GAT only, e.g. --hp-num-heads 2 4 8)',
     )
     parser.add_argument(
+        '--hp-init-method',
+        type=str,
+        nargs='+',
+        default=None,
+        choices=['xavier_uniform', 'kaiming', 'orthogonal', 'default'],
+        help='Weight initialization methods to search',
+    )
+    parser.add_argument(
         '--cv-only',
         action='store_true',
         default=False,
@@ -300,6 +308,7 @@ def main():
     # ── Hyperparameter selection via k-fold CV ──────────────────────────
     # Resolved training params — may be overridden by HP search below
     best_lambda_agg = args.lambda_agg
+    best_init_method = args.init_method
     best_model_kwargs = dict(model_kwargs)
 
     if args.k_folds > 0:
@@ -317,6 +326,11 @@ def main():
                 hp_grid['num_heads'] = args.hp_num_heads
             elif 'num_heads' in DEFAULT_GNN_HP_GRID:
                 hp_grid['num_heads'] = DEFAULT_GNN_HP_GRID['num_heads']
+
+        if args.hp_init_method is not None:
+            hp_grid['init_method'] = args.hp_init_method
+        elif 'init_method' in DEFAULT_GNN_HP_GRID:
+            hp_grid['init_method'] = DEFAULT_GNN_HP_GRID['init_method']
 
         search_results = run_hp_search_cv(
             model_class=model_class,
@@ -339,6 +353,7 @@ def main():
 
         # Apply best config to final training
         best_lambda_agg = best_config.get('lambda_agg', args.lambda_agg)
+        best_init_method = best_config.get('init_method', args.init_method)
         if 'num_heads' in best_config and args.model == 'gat':
             best_model_kwargs['num_heads'] = best_config['num_heads']
 
@@ -390,7 +405,7 @@ def main():
     )
 
     model = get_model(args.model, **best_model_kwargs)
-    init_weights(model, method=args.init_method)
+    init_weights(model, method=best_init_method)
     print(f"\nModel architecture:\n{model}")
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
