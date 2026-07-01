@@ -1,6 +1,7 @@
 name: attacker-detector
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
@@ -8,7 +9,8 @@ dependencies:
   - pytorch
   - torchvision
   - torchaudio
-  - cpuonly  # Remove this line if using GPU, add pytorch-cuda=11.8 instead
+  - pytorch-cuda=12.1
+  #- cpuonly # without gpu
   - numpy
   - pandas
   - scikit-learn
@@ -18,3 +20,4 @@ dependencies:
   - pip
   - pip:
     - xxhash
+    - torch-geometric

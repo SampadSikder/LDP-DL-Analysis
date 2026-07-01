@@ -169,10 +169,11 @@ def build_knn_graph(pca_features: np.ndarray, k: int = 10) -> tuple:
         filtered_indices.append(idx_filtered)
         filtered_distances.append(dist_filtered)
 
+    # After removing self
     knn_indices = np.array(filtered_indices)
     knn_distances = np.array(filtered_distances)
 
-    # Construct symmetric edge list (undirected, no self-loops)
+    # Construct symmetric edge list
     edges = set()
     for i in range(n):
         for j in knn_indices[i]:
@@ -186,7 +187,6 @@ def build_knn_graph(pca_features: np.ndarray, k: int = 10) -> tuple:
         edge_index = np.empty((2, 0), dtype=np.int64)
 
     if actual_k < k:
-        #Padding
         pad_size = k - actual_k
         knn_indices = np.pad(knn_indices, ((0, 0), (0, pad_size)), mode='edge')
         knn_distances = np.pad(knn_distances, ((0, 0), (0, pad_size)), mode='edge')
