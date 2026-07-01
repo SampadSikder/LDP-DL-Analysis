@@ -191,7 +191,6 @@ def run_gnn_sensitivity_analysis(per_graph_results: list) -> pd.DataFrame:
 
 
 def _save_gnn_sensitivity_plots(sensitivity_df: pd.DataFrame, output_dir: str = None) -> None:
-    """Save one PNG per metric, matching main.py's plot style."""
     metrics = ['F1_Score', 'Accuracy', 'Precision', 'Recall']
     numeric_params = ['epsilon', 'ratio']
     categorical_params = ['protocol', 'dataset_type']
@@ -260,7 +259,6 @@ def build_model_kwargs(args, input_dim: int) -> dict:
 
 
 def main():
-    """Main entry point."""
     args = parse_args()
 
     # Reproducibility
