@@ -9,6 +9,8 @@ A deep learning-based attacker detection system for Local Differential Privacy (
 | `mlp` | Multi-layer perceptron with BatchNorm and Dropout |
 | `gan` | GAN-style discriminator with LayerNorm |
 | `attention` | Transformer-style with per-feature embeddings and multi-head attention |
+| `gat` | 3-layer Graph Attention Network with multi-head attention and composite loss |
+| `graphsage` | 3-layer GraphSAGE with mean aggregation |
 
 ## Installation
 
@@ -229,8 +231,33 @@ python main_gnn.py \
     --model gat \
     --k-folds 5 \
     --epochs 50 \
+    --test-ratio 0.2 \
+    --val-ratio 0.2 \
     --output-dir ./results_cv
+
+# Custom HP search grid
+python main_gnn.py \
+    --data-path dataset_pca.pt \
+    --model gat \
+    --k-folds 5 \
+    --hp-lambda-agg 0.05 0.1 0.2 \
+    --hp-num-heads 2 4 8 \
+    --test-ratio 0.2 \
+    --val-ratio 0.2 \
+    --output-dir ./results_hp
+
+# CV/HP search only
+python main_gnn.py \
+    --data-path dataset_pca.pt \
+    --model gat \
+    --k-folds 5 \
+    --cv-only \
+    --test-ratio 0.2 \
+    --val-ratio 0.2 \
+    --output-dir ./results_cv_only
 ```
+
+When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) combinations. The best config by mean validation F1 is selected and used for final training. Use `--cv-only` to skip final training and only output CV results.
 
 ### CLI Arguments
 
@@ -249,6 +276,9 @@ python main_gnn.py \
 | `--patience` | Early stopping patience (epochs without val F1 improvement) | 10 |
 | `--init-method` | Weight initialization: `xavier_uniform`, `kaiming`, `orthogonal`, `default` | `xavier_uniform` |
 | `--k-folds` | Number of k-fold CV folds (0 = skip CV) | 0 |
+| `--hp-lambda-agg` | Lambda values to search (e.g. `0.05 0.1 0.2`) | `[0.05, 0.1, 0.2]` |
+| `--hp-num-heads` | Attention heads to search (GAT only, e.g. `2 4 8`) | `[2, 4, 8]` |
+| `--cv-only` | Run only CV / HP search, skip final training + test | False |
 | `--test-ratio` | Fraction of graphs for test set | 0.15 |
 | `--val-ratio` | Fraction of graphs for validation set | 0.15 |
 | `--seed` | Random seed | 42 |
@@ -273,6 +303,8 @@ When `--output-dir` is specified:
 |------|----------|
 | `gat_model.pt` / `graphsage_model.pt` | Model checkpoint (weights + optimizer state + history) |
 | `training_history.csv` | Per-epoch: total loss, cls loss, agg loss, val F1, val accuracy, LR |
+| `hp_search_results.csv` | Per-config HP search summary: config values, mean F1, accuracy, precision, recall |
+| `cv_results.csv` | Fold-level results for the best HP config |
 | `test_metrics.csv` | Overall test: Accuracy, Precision, Recall, F1_Score |
 | `per_graph_results.csv` | Per-graph metrics with ε, ratio, protocol, dataset_type |
 | `sensitivity_test_results.csv` | Sensitivity table grouped by parameter (matches `main.py` format) |

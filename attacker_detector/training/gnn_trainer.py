@@ -490,3 +490,142 @@ def run_k_fold_cv(
         'mean': mean_metrics,
         'std': std_metrics,
     }
+
+
+def run_hp_search_cv(
+    model_class,
+    base_model_kwargs: Dict,
+    dataset_loader,
+    hp_grid: Dict[str, list],
+    n_folds: int = 5,
+    epochs: int = 50,
+    batch_size: int = 32,
+    patience: int = 10,
+    init_method: str = 'default',
+    model_type: str = 'gat',
+    device: torch.device = None,
+    seed: int = 42,
+    base_learning_rate: float = 0.001,
+    base_lambda_agg: float = 0.1,
+) -> Dict:
+    """
+    Grid search over hyperparameters using k-fold CV.
+
+    Searches over all combinations in `hp_grid` and selects the config
+    with the highest mean validation F1 across folds.
+
+    Searchable keys in hp_grid:
+        - 'lambda_agg':  list of floats
+        - 'num_heads':   list of ints (GAT only)
+
+    Args:
+        model_class: Model class (e.g. GATAttackerDetector).
+        base_model_kwargs: Base kwargs for model constructor.
+        dataset_loader: GraphDatasetLoader instance.
+        hp_grid: Dict mapping param names to lists of values to search.
+        n_folds: Number of CV folds.
+        epochs: Max epochs per fold.
+        batch_size: Graphs per batch.
+        patience: Early stopping patience.
+        init_method: Weight initialization method.
+        model_type: 'gat' or 'graphsage'.
+        device: Torch device.
+        seed: Random seed.
+        base_learning_rate: LR used for all configs.
+        base_lambda_agg: Fallback lambda if not in grid.
+
+    Returns:
+        Dict with:
+            - 'best_config': dict of winning hyperparameter values
+            - 'best_cv_results': full CV result dict for the winner
+            - 'all_results': list of {config, mean_f1, ...} per combo
+    """
+    import itertools
+
+    if device is None:
+        device = get_device()
+
+    # Build the search space
+    param_names = sorted(hp_grid.keys())
+    param_values = [hp_grid[k] for k in param_names]
+    all_combos = list(itertools.product(*param_values))
+    total_combos = len(all_combos)
+
+    print(f"\n{'='*70}")
+    print(f"Hyperparameter Search ({total_combos} configs × {n_folds} folds)")
+    print(f"{'='*70}")
+    for name in param_names:
+        print(f"  {name}: {hp_grid[name]}")
+    print(f"{'='*70}")
+
+    best_mean_f1 = -1.0
+    best_config = None
+    best_cv_results = None
+    all_results = []
+
+    for combo_i, values in enumerate(all_combos):
+        config = dict(zip(param_names, values))
+
+        print(f"\n{'─'*70}")
+        print(f"Config {combo_i + 1}/{total_combos}: {config}")
+        print(f"{'─'*70}")
+
+        # Build model kwargs for this config
+        model_kwargs = dict(base_model_kwargs)
+        if 'num_heads' in config:
+            model_kwargs['num_heads'] = config['num_heads']
+
+        # Training params for this config
+        lr = base_learning_rate
+        lam = config.get('lambda_agg', base_lambda_agg)
+
+        # Need to re-resolve model_class if hidden_dim changed
+        cv_results = run_k_fold_cv(
+            model_class=model_class,
+            model_kwargs=model_kwargs,
+            dataset_loader=dataset_loader,
+            n_folds=n_folds,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=lr,
+            lambda_agg=lam,
+            patience=patience,
+            init_method=init_method,
+            model_type=model_type,
+            device=device,
+            seed=seed,
+        )
+
+        mean_f1 = cv_results['mean']['F1_Score']
+
+        result_entry = {
+            **config,
+            'mean_f1': mean_f1,
+            'mean_accuracy': cv_results['mean']['Accuracy'],
+            'mean_precision': cv_results['mean']['Precision'],
+            'mean_recall': cv_results['mean']['Recall'],
+            'std_f1': cv_results['std']['F1_Score'],
+        }
+        all_results.append(result_entry)
+
+        if mean_f1 > best_mean_f1:
+            best_mean_f1 = mean_f1
+            best_config = dict(config)
+            best_cv_results = cv_results
+            print(f"  ★ New best config! Mean F1 = {mean_f1:.4f}")
+
+    # Summary
+    print(f"\n{'='*70}")
+    print(f"Hyperparameter Search Complete")
+    print(f"{'='*70}")
+    print(f"  Best config: {best_config}")
+    print(f"  Best mean F1: {best_mean_f1:.4f}")
+    print(f"  Searched {total_combos} configurations × {n_folds} folds")
+    print(f"{'='*70}")
+
+    return {
+        'best_config': best_config,
+        'best_cv_results': best_cv_results,
+        'all_results': all_results,
+    }
+

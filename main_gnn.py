@@ -22,6 +22,7 @@ from config import (
     DEFAULT_GNN_K_FOLDS,
     DEFAULT_GNN_BATCH_SIZE,
     DEFAULT_GNN_INPUT_DIM,
+    DEFAULT_GNN_HP_GRID,
 )
 from attacker_detector.models import get_model
 from attacker_detector.data.graph_dataset import GraphDatasetLoader
@@ -29,6 +30,7 @@ from attacker_detector.training.gnn_trainer import (
     GNNTrainer,
     init_weights,
     run_k_fold_cv,
+    run_hp_search_cv,
     get_device,
 )
 
@@ -70,7 +72,7 @@ def parse_args():
         '--num-heads',
         type=int,
         default=DEFAULT_GNN_NUM_HEADS,
-        help='Number of attention heads (GAT only)',
+        help='Number of attention heads',
     )
     parser.add_argument(
         '--dropout',
@@ -120,15 +122,34 @@ def parse_args():
         help='Weight initialization method',
     )
 
-    # Cross-validation
+    # Cross-validation & hyperparameter search
     parser.add_argument(
         '--k-folds',
         type=int,
         default=0,
         help='Number of folds for k-fold CV (0 to skip)',
     )
+    parser.add_argument(
+        '--hp-lambda-agg',
+        type=float,
+        nargs='+',
+        default=None,
+        help='Lambda (agg loss weight) values to search (e.g. --hp-lambda-agg 0.05 0.1 0.2)',
+    )
+    parser.add_argument(
+        '--hp-num-heads',
+        type=int,
+        nargs='+',
+        default=None,
+        help='Number of attention heads to search (GAT only, e.g. --hp-num-heads 2 4 8)',
+    )
+    parser.add_argument(
+        '--cv-only',
+        action='store_true',
+        default=False,
+        help='Run only CV / HP search and skip final training + test evaluation',
+    )
 
-    # Splits
     parser.add_argument(
         '--test-ratio',
         type=float,
@@ -276,36 +297,80 @@ def main():
     model_kwargs = build_model_kwargs(args, input_dim)
 
 
+    # ── Hyperparameter selection via k-fold CV ──────────────────────────
+    # Resolved training params — may be overridden by HP search below
+    best_lambda_agg = args.lambda_agg
+    best_model_kwargs = dict(model_kwargs)
+
     if args.k_folds > 0:
         model_class = type(get_model(args.model, **model_kwargs))
 
-        cv_results = run_k_fold_cv(
+        # Build search grid: use --hp-* flags if provided, else defaults
+        hp_grid = {}
+        if args.hp_lambda_agg is not None:
+            hp_grid['lambda_agg'] = args.hp_lambda_agg
+        elif 'lambda_agg' in DEFAULT_GNN_HP_GRID:
+            hp_grid['lambda_agg'] = DEFAULT_GNN_HP_GRID['lambda_agg']
+
+        if args.model == 'gat':
+            if args.hp_num_heads is not None:
+                hp_grid['num_heads'] = args.hp_num_heads
+            elif 'num_heads' in DEFAULT_GNN_HP_GRID:
+                hp_grid['num_heads'] = DEFAULT_GNN_HP_GRID['num_heads']
+
+        search_results = run_hp_search_cv(
             model_class=model_class,
-            model_kwargs=model_kwargs,
+            base_model_kwargs=model_kwargs,
             dataset_loader=dataset,
+            hp_grid=hp_grid,
             n_folds=args.k_folds,
             epochs=args.epochs,
             batch_size=args.batch_size,
-            learning_rate=args.lr,
-            lambda_agg=args.lambda_agg,
             patience=args.patience,
             init_method=args.init_method,
             model_type=args.model,
             device=device,
             seed=args.seed,
+            base_learning_rate=args.lr,
+            base_lambda_agg=args.lambda_agg,
         )
+
+        best_config = search_results['best_config']
+
+        # Apply best config to final training
+        best_lambda_agg = best_config.get('lambda_agg', args.lambda_agg)
+        if 'num_heads' in best_config and args.model == 'gat':
+            best_model_kwargs['num_heads'] = best_config['num_heads']
 
         if args.output_dir:
             os.makedirs(args.output_dir, exist_ok=True)
-            cv_df = pd.DataFrame(cv_results['fold_results'])
+
+            # Save per-config search summary
+            search_df = pd.DataFrame(search_results['all_results'])
+            search_path = os.path.join(args.output_dir, 'hp_search_results.csv')
+            search_df.to_csv(search_path, index=False)
+            print(f"\nHP search results saved to: {search_path}")
+
+            # Save best config's fold-level results
+            cv_df = pd.DataFrame(search_results['best_cv_results']['fold_results'])
             cv_path = os.path.join(args.output_dir, 'cv_results.csv')
             cv_df.to_csv(cv_path, index=False)
-            print(f"\nCV results saved to: {cv_path}")
+            print(f"Best config CV results saved to: {cv_path}")
 
+    if args.cv_only:
+        print("\n--cv-only set, skipping final training and test evaluation.")
+        print("Done!")
+        return
 
+    # ── Final Training (using best config) ─────────────────────────────
     print("\n" + "=" * 70)
     print("Final Training (Train+Val → Test)")
     print("=" * 70)
+    if args.k_folds > 0:
+        print(f"  Using best HP config from CV search:")
+        print(f"    Learning rate: {args.lr}")
+        print(f"    Lambda (agg):  {best_lambda_agg}")
+        print(f"    Model kwargs:  {best_model_kwargs}")
 
     splits = dataset.stratified_split(
         test_ratio=args.test_ratio,
@@ -324,7 +389,7 @@ def main():
         splits['test'], batch_size=args.batch_size, shuffle=False, pin_memory=pin
     )
 
-    model = get_model(args.model, **model_kwargs)
+    model = get_model(args.model, **best_model_kwargs)
     init_weights(model, method=args.init_method)
     print(f"\nModel architecture:\n{model}")
     total_params = sum(p.numel() for p in model.parameters())
@@ -335,7 +400,7 @@ def main():
         model=model,
         device=device,
         learning_rate=args.lr,
-        lambda_agg=args.lambda_agg,
+        lambda_agg=best_lambda_agg,
         patience=args.patience,
         model_type=args.model,
     )
