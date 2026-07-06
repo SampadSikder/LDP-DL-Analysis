@@ -59,15 +59,23 @@ class GNNTrainer:
         device: torch.device = None,
         learning_rate: float = 0.001,
         lambda_agg: float = 0.1,
+        lambda_utility: float = 0.0,
+        utility_metric: str = 'js',
         patience: int = 10,
         model_type: str = 'gat',
+        pos_weight: Optional[float] = None,
+        threshold: float = 0.5,
     ):
         self.device = device if device is not None else get_device()
         self.model = model.to(self.device)
         self.learning_rate = learning_rate
         self.lambda_agg = lambda_agg
+        self.lambda_utility = lambda_utility
+        self.utility_metric = utility_metric
         self.patience = patience
         self.model_type = model_type
+        self._pos_weight_override = pos_weight  
+        self.threshold = threshold
 
         self._use_amp = self.device.type == 'cuda'
         self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
@@ -93,9 +101,23 @@ class GNNTrainer:
             total_pos += (labels == 1).sum().item()
             total_neg += (labels == 0).sum().item()
 
-        ratio = total_neg / max(total_pos, 1)
-        print(f"Class balance: {total_neg:,} benign / {total_pos:,} attackers = {ratio:.2f}:1")
+        if self._pos_weight_override is not None:
+            ratio = self._pos_weight_override
+            print(f"Class balance: {total_neg:,} benign / {total_pos:,} attackers "
+                  f"(pos_weight = {ratio:.4f} [manual])")
+        else:
+            ratio = total_neg / max(total_pos, 1)
+            print(f"Class balance: {total_neg:,} benign / {total_pos:,} attackers "
+                  f"(pos_weight = {ratio:.4f} [auto])")
         return torch.tensor([ratio], dtype=torch.float32, device=self.device)
+
+    def _extract_utility_tensors(self, batch):
+        batch_idx = getattr(batch, 'batch', None)
+        u_all_attr = f'utility_{self.utility_metric}_all'
+        u_benign_attr = f'utility_{self.utility_metric}_benign'
+        utility_all = getattr(batch, u_all_attr, None)
+        utility_benign = getattr(batch, u_benign_attr, None)
+        return batch_idx, utility_all, utility_benign
 
     def _train_one_epoch(
         self,
@@ -106,6 +128,7 @@ class GNNTrainer:
         epoch_loss = 0.0
         epoch_cls_loss = 0.0
         epoch_agg_loss = 0.0
+        epoch_util_loss = 0.0
         num_batches = 0
 
         for batch in train_loader:
@@ -113,10 +136,15 @@ class GNNTrainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
+            batch_idx, utility_all, utility_benign = self._extract_utility_tensors(batch)
+
             with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
                 logits, attention_weights = self.model(batch.x, batch.edge_index)
                 labels = batch.y.unsqueeze(1)
-                loss, loss_dict = self.criterion(logits, labels, attention_weights)
+                loss, loss_dict = self.criterion(
+                    logits, labels, attention_weights,
+                    batch_idx=batch_idx, utility_all=utility_all, utility_benign=utility_benign
+                )
 
             # Backward with AMP scaler
             self._scaler.scale(loss).backward()
@@ -130,12 +158,14 @@ class GNNTrainer:
             epoch_loss += loss_dict['total']
             epoch_cls_loss += loss_dict['cls']
             epoch_agg_loss += loss_dict['agg']
+            epoch_util_loss += loss_dict.get('utility', 0.0)
             num_batches += 1
 
         return {
             'train_loss': epoch_loss / max(num_batches, 1),
             'train_cls_loss': epoch_cls_loss / max(num_batches, 1),
             'train_agg_loss': epoch_agg_loss / max(num_batches, 1),
+            'train_util_loss': epoch_util_loss / max(num_batches, 1),
         }
 
     @torch.no_grad()
@@ -149,17 +179,23 @@ class GNNTrainer:
         val_loss = 0.0
         val_cls_loss = 0.0
         val_agg_loss = 0.0
+        val_util_loss = 0.0
         num_batches = 0
 
         for batch in val_loader:
             batch = batch.to(self.device, non_blocking=True)
+            batch_idx, utility_all, utility_benign = self._extract_utility_tensors(batch)
+
             with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
                 logits, attention_weights = self.model(batch.x, batch.edge_index)
                 labels = batch.y.unsqueeze(1)
-                loss, loss_dict = self.criterion(logits, labels, attention_weights)
+                loss, loss_dict = self.criterion(
+                    logits, labels, attention_weights,
+                    batch_idx=batch_idx, utility_all=utility_all, utility_benign=utility_benign
+                )
 
             probs = torch.sigmoid(logits).cpu().numpy().flatten()
-            preds = (probs > 0.5).astype(int)
+            preds = (probs > self.threshold).astype(int)
 
             all_preds.extend(preds)
             all_labels.extend(batch.y.cpu().numpy().flatten())
@@ -167,6 +203,7 @@ class GNNTrainer:
             val_loss += loss_dict['total']
             val_cls_loss += loss_dict['cls']
             val_agg_loss += loss_dict['agg']
+            val_util_loss += loss_dict.get('utility', 0.0)
             num_batches += 1
 
         all_preds = np.array(all_preds)
@@ -176,6 +213,7 @@ class GNNTrainer:
             'val_loss': val_loss / max(num_batches, 1),
             'val_cls_loss': val_cls_loss / max(num_batches, 1),
             'val_agg_loss': val_agg_loss / max(num_batches, 1),
+            'val_util_loss': val_util_loss / max(num_batches, 1),
             'val_accuracy': accuracy_score(all_labels, all_preds),
             'val_precision': precision_score(all_labels, all_preds, zero_division=0),
             'val_recall': recall_score(all_labels, all_preds, zero_division=0),
@@ -197,6 +235,8 @@ class GNNTrainer:
         pos_weight = self._compute_pos_weight(train_loader)
         self.criterion = CompositeLoss(
             lambda_agg=self.lambda_agg,
+            lambda_utility=self.lambda_utility,
+            utility_metric=self.utility_metric,
             pos_weight=pos_weight,
         )
         scheduler = None
@@ -215,6 +255,7 @@ class GNNTrainer:
             print(f"\nStarting Training ({epochs} epochs, patience={self.patience})...")
             print(f"  Model type: {self.model_type}")
             print(f"  Lambda (aggregation): {self.lambda_agg}")
+            print(f"  Lambda (utility): {self.lambda_utility} ({self.utility_metric})")
 
         for epoch in range(epochs):
             train_metrics = self._train_one_epoch(train_loader)
@@ -248,7 +289,8 @@ class GNNTrainer:
                     f"  Epoch {epoch + 1:3d}/{epochs} | "
                     f"Train Loss: {train_metrics['train_loss']:.4f} "
                     f"(cls={train_metrics['train_cls_loss']:.4f}, "
-                    f"agg={train_metrics['train_agg_loss']:.4f}) | "
+                    f"agg={train_metrics['train_agg_loss']:.4f}, "
+                    f"util={train_metrics['train_util_loss']:.4f}) | "
                     f"Val Loss: {val_metrics['val_loss']:.4f} | "
                     f"Val F1: {val_metrics['val_f1']:.4f} | "
                     f"LR: {current_lr:.6f}"
@@ -290,7 +332,7 @@ class GNNTrainer:
             with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
                 logits, _ = self.model(batch.x, batch.edge_index)
             probs = torch.sigmoid(logits).cpu().numpy().flatten()
-            preds = (probs > 0.5).astype(int)
+            preds = (probs > self.threshold).astype(int)
 
             all_preds.extend(preds)
             all_labels.extend(batch.y.cpu().numpy().flatten())
@@ -344,7 +386,7 @@ class GNNTrainer:
             with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
                 logits, _ = self.model(batch.x, batch.edge_index)
             probs = torch.sigmoid(logits).cpu().numpy().flatten()
-            preds = (probs > 0.5).astype(int)
+            preds = (probs > self.threshold).astype(int)
             labels = batch.y.cpu().numpy().flatten()
 
             result = {
@@ -394,11 +436,15 @@ def run_k_fold_cv(
     batch_size: int = 32,
     learning_rate: float = 0.001,
     lambda_agg: float = 0.1,
+    lambda_utility: float = 0.0,
+    utility_metric: str = 'js',
     patience: int = 10,
     init_method: str = 'default',
     model_type: str = 'gat',
     device: torch.device = None,
     seed: int = 42,
+    pos_weight: Optional[float] = None,
+    threshold: float = 0.5,
 ) -> Dict:
     """
     Args:
@@ -410,11 +456,15 @@ def run_k_fold_cv(
         batch_size: Graphs per batch.
         learning_rate: Optimizer LR.
         lambda_agg: Aggregation loss weight.
+        lambda_utility: Utility loss weight.
+        utility_metric: Metric for utility loss ('js' or 'wasserstein').
         patience: Early stopping patience.
         init_method: Weight initialization method.
         model_type: 'gat' or 'graphsage'.
         device: Torch device.
         seed: Random seed.
+        pos_weight: Positive class weight (None = auto from data).
+        threshold: Classification threshold for predictions.
     """
     if device is None:
         device = get_device()
@@ -425,7 +475,7 @@ def run_k_fold_cv(
     print(f"K-Fold Cross-Validation ({n_folds} folds)")
     print(f"  Model: {model_type}")
     print(f"  Init: {init_method}")
-    print(f"  LR: {learning_rate}, Lambda: {lambda_agg}")
+    print(f"  LR: {learning_rate}, Lambda (agg): {lambda_agg}, Lambda (utility): {lambda_utility} ({utility_metric})")
     print(f"  Patience: {patience}, Max epochs: {epochs}")
     print(f"{'='*70}")
 
@@ -451,8 +501,12 @@ def run_k_fold_cv(
             device=device,
             learning_rate=learning_rate,
             lambda_agg=lambda_agg,
+            lambda_utility=lambda_utility,
+            utility_metric=utility_metric,
             patience=patience,
             model_type=model_type,
+            pos_weight=pos_weight,
+            threshold=threshold,
         )
         trainer.fit(
             train_loader=train_loader,
@@ -507,17 +561,12 @@ def run_hp_search_cv(
     seed: int = 42,
     base_learning_rate: float = 0.001,
     base_lambda_agg: float = 0.1,
+    base_lambda_utility: float = 0.0,
+    utility_metric: str = 'js',
+    pos_weight: Optional[float] = None,
+    threshold: float = 0.5,
 ) -> Dict:
     """
-    Grid search over hyperparameters using k-fold CV.
-
-    Searches over all combinations in `hp_grid` and selects the config
-    with the highest mean validation F1 across folds.
-
-    Searchable keys in hp_grid:
-        - 'lambda_agg':   list of floats
-        - 'num_heads':    list of ints (GAT only)
-        - 'init_method':  list of strs
 
     Args:
         model_class: Model class (e.g. GATAttackerDetector).
@@ -533,13 +582,11 @@ def run_hp_search_cv(
         device: Torch device.
         seed: Random seed.
         base_learning_rate: LR used for all configs.
-        base_lambda_agg: Fallback lambda if not in grid.
-
-    Returns:
-        Dict with:
-            - 'best_config': dict of winning hyperparameter values
-            - 'best_cv_results': full CV result dict for the winner
-            - 'all_results': list of {config, mean_f1, ...} per combo
+        base_lambda_agg: Fallback lambda_agg if not in grid.
+        base_lambda_utility: Fallback lambda_utility if not in grid.
+        utility_metric: Metric for utility loss ('js' or 'wasserstein').
+        pos_weight: Positive class weight (None = auto from data).
+        threshold: Classification threshold for predictions.
     """
     import itertools
 
@@ -579,6 +626,7 @@ def run_hp_search_cv(
         # Training params for this config
         lr = base_learning_rate
         lam = config.get('lambda_agg', base_lambda_agg)
+        lam_util = config.get('lambda_utility', base_lambda_utility)
         init = config.get('init_method', init_method)
 
         cv_results = run_k_fold_cv(
@@ -590,11 +638,15 @@ def run_hp_search_cv(
             batch_size=batch_size,
             learning_rate=lr,
             lambda_agg=lam,
+            lambda_utility=lam_util,
+            utility_metric=utility_metric,
             patience=patience,
             init_method=init,
             model_type=model_type,
             device=device,
             seed=seed,
+            pos_weight=pos_weight,
+            threshold=threshold,
         )
 
         mean_f1 = cv_results['mean']['F1_Score']
@@ -615,7 +667,6 @@ def run_hp_search_cv(
             best_cv_results = cv_results
             print(f"  ★ New best config! Mean F1 = {mean_f1:.4f}")
 
-    # Summary
     print(f"\n{'='*70}")
     print(f"Hyperparameter Search Complete")
     print(f"{'='*70}")

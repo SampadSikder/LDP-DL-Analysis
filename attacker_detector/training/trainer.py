@@ -66,8 +66,9 @@ class Trainer:
         # Calculate class imbalance
         num_benign = (y_train == 0).sum()
         num_attackers = (y_train == 1).sum()
-        ratio = num_benign / max(num_attackers, 1)
-        print(f"Class Imbalance Ratio: 1 Attacker : {ratio:.2f} Benign")
+        # Currently using 1 as severe imbalance 5.77:1 Benign:Attacker
+        ratio = 1.0
+        print(f"Class Imbalance: {num_benign:,} benign / {num_attackers:,} attackers (pos_weight = {ratio:.4f})")
         
         # Set up weighted loss
         pos_weight = torch.tensor([ratio]).float().to(self.device)

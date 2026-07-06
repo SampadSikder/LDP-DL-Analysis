@@ -100,7 +100,7 @@ def run_one_task(task: dict) -> dict:
       3. Return result dict with PyG Data object
     """
     try:
-        support_list, labels = generate_perturbed_data(
+        support_list, labels, real_dist, estimate_dist_all = generate_perturbed_data(
             epsilon=task['epsilon'],
             domain=task['domain'],
             n=task['n'],
@@ -130,7 +130,9 @@ def run_one_task(task: dict) -> dict:
             epsilon=task['epsilon'],
             pca_dim=task['pca_dim'],
             knn_k=task['knn_k'],
-            metadata=metadata
+            metadata=metadata,
+            real_dist=real_dist,
+            estimate_dist_all=estimate_dist_all,
         )
 
         return {

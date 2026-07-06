@@ -1,28 +1,35 @@
 """Composite loss function for GNN attacker detection.
 
-Implements: L = L_classification + λ * L_aggregation
+Implements: L = L_classification + λ_agg * L_aggregation + λ_utility * L_utility
 """
 
 import torch
 import torch.nn as nn
 from typing import Optional, List, Tuple, Dict
+from .utility_loss import UtilityLoss
 
 
 class CompositeLoss(nn.Module):
     """
     Args:
-        lambda_agg: Weight for the aggregation loss term.
+        lambda_agg: Weight for the aggregation loss term (attention entropy).
+        lambda_utility: Weight for the utility-aware loss term.
+        utility_metric: Metric for utility loss ('js' or 'wasserstein').
         pos_weight: Positive class weight for BCEWithLogitsLoss (handles class imbalance).
     """
 
     def __init__(
         self,
         lambda_agg: float = 0.1,
+        lambda_utility: float = 0.0,
+        utility_metric: str = 'js',
         pos_weight: Optional[torch.Tensor] = None,
     ):
         super(CompositeLoss, self).__init__()
         self.lambda_agg = lambda_agg
+        self.lambda_utility = lambda_utility
         self.classification_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.utility_loss = UtilityLoss(metric=utility_metric)
 
     def _compute_attention_entropy(
         self,
@@ -51,6 +58,9 @@ class CompositeLoss(nn.Module):
         logits: torch.Tensor,
         labels: torch.Tensor,
         attention_weights: Optional[List] = None,
+        batch_idx: Optional[torch.Tensor] = None,
+        utility_all: Optional[torch.Tensor] = None,
+        utility_benign: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         l_cls = self.classification_loss(logits, labels)
 
@@ -59,11 +69,23 @@ class CompositeLoss(nn.Module):
         else:
             l_agg = torch.tensor(0.0, device=logits.device)
 
-        total_loss = l_cls + self.lambda_agg * l_agg
+        if utility_all is not None and utility_benign is not None and self.lambda_utility > 0:
+            l_util = self.utility_loss(
+                logits=logits,
+                labels=labels,
+                batch_idx=batch_idx,
+                utility_all=utility_all,
+                utility_benign=utility_benign,
+            )
+        else:
+            l_util = torch.tensor(0.0, device=logits.device)
+
+        total_loss = l_cls + self.lambda_agg * l_agg + self.lambda_utility * l_util
 
         loss_dict = {
             'cls': l_cls.item(),
             'agg': l_agg.item(),
+            'utility': l_util.item(),
             'total': total_loss.item(),
         }
 

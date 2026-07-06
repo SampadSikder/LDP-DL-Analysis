@@ -121,11 +121,11 @@ Data(
 )
 ```
 
-### Node Feature Composition (24 Dims)
+### Node Feature Composition (40 Dims)
 
 | Feature Block | Dims | Description |
 |--------------|------|-------------|
-| PCA coordinates | 16 (or `pca_dim`) | `pc_0` ... `pc_15` |
+| PCA coordinates | 32 (or `pca_dim`) | `pc_0` ... `pc_31` |
 | Density features | 4 | `avg_knn_dist`, `local_density`, `relative_density`, `knn_dist_std` |
 | Influence features | 3 | `in_degree`, `degree_centrality`, `hub_score` |
 | Epsilon | 1 | Epsilon value (broadcasted to all nodes) |
@@ -282,12 +282,17 @@ When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) 
 | `--dropout` | Dropout rate | 0.2 |
 | `--epochs`, `-e` | Maximum training epochs | 5 |
 | `--lr` | Learning rate (AdamW) | 0.001 |
-| `--lambda-agg` | Attention entropy regularization weight λ | 0.1 |
+| `--lambda-agg` | Attention entropy regularization weight λ_agg | 0.1 |
+| `--lambda-utility` | Utility-aware loss weight λ_utility | 0.0 |
+| `--utility-metric` | Utility metric: `js` (Jensen-Shannon divergence) or `wasserstein` (Wasserstein distance) | `js` |
+| `--pos-weight` | Positive class weight for BCE loss: `auto` (neg/pos ratio from data) or a float | `auto` |
+| `--threshold` | Classification threshold (lower → more attacker predictions, higher recall) | 0.5 |
 | `--batch-size`, `-b` | Graphs per batch | 32 |
 | `--patience` | Early stopping patience (epochs without val F1 improvement) | 10 |
 | `--init-method` | Weight initialization: `xavier_uniform`, `kaiming`, `orthogonal`, `default` | `xavier_uniform` |
 | `--k-folds` | Number of k-fold CV folds (0 = skip CV) | 0 |
-| `--hp-lambda-agg` | Lambda values to search | `[0.05, 0.1, 0.2]` |
+| `--hp-lambda-agg` | Lambda agg values to search | `[0.05, 0.1, 0.2]` |
+| `--hp-lambda-utility` | Lambda utility values to search | None |
 | `--hp-num-heads` | Attention heads to search (GAT only) | `[2, 4, 8]` |
 | `--hp-init-method` | Weight init methods to search | `[xavier_uniform, kaiming, orthogonal]` |
 | `--cv-only` | Run only CV / HP search, skip final training + test | False |
@@ -302,11 +307,12 @@ When `--k-folds > 0`, a grid search runs over `lambda_agg` × `num_heads` (GAT) 
 The training uses a **composite loss**:
 
 ```
-L = L_classification  +  λ × L_aggregation
+L = L_classification  +  λ_agg × L_aggregation  +  λ_utility × L_utility
 ```
 
-- **L_classification** — `BCEWithLogitsLoss` with positive class weighting to handle the 9:1 benign/attacker imbalance.
+- **L_classification** — `BCEWithLogitsLoss` with positive class weighting. `--pos-weight auto` computes `neg_count / pos_count` from training data (e.g. ~5.77 for a 85/15 split). A manual float can be supplied to override (e.g. `--pos-weight 1.0` for uniform weighting).
 - **L_aggregation** — Attention entropy regularizer (GAT only). Penalises uniform attention distributions across neighbours, encouraging peaked/discriminative attention. Zero for GraphSAGE.
+- **L_utility** — Utility-aware loss. Rewards attacker predictions that bring the LDP frequency distribution closer to the ground truth distribution (`REAL_DIST`). Measures JS divergence or Wasserstein distance improvements toward the optimal benign-only baseline. Controlled by `--lambda-utility` and `--utility-metric`.
 
 ### Output Files
 

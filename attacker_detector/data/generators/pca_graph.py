@@ -62,12 +62,12 @@ def generate_perturbed_data(
         Y = np.zeros(n)
 
         if olh_setting == 'user':
-            support_list, _, _, _ = build_support_list_1_OLH(
+            support_list, _, estimate_dist, _ = build_support_list_1_OLH(
                 domain, Y, n, User_Seed, ratio, g, target_set,
                 p, splits, h_ao, epsilon, processor=processors
             )
         else:
-            support_list, _, _, _ = build_support_list_1_OLH_Server(
+            support_list, _, estimate_dist, _ = build_support_list_1_OLH_Server(
                 domain, Y, n, User_Seed, ratio, g, target_set,
                 p, splits, h_ao, epsilon, processor=processors
             )
@@ -84,10 +84,10 @@ def generate_perturbed_data(
             splits=splits,
             num_processes=processors
         )
-        support_list, _, _, _ = build_support_list_1_OUE(Y_data, n, epsilon)
+        support_list, _, estimate_dist, _ = build_support_list_1_OUE(Y_data, n, epsilon)
 
     elif protocol == "HST_User":
-        support_list, _, _, _ = HST_Users(
+        support_list, _, estimate_dist, _ = HST_Users(
             X=X,
             ratio=ratio,
             domain=domain,
@@ -99,7 +99,7 @@ def generate_perturbed_data(
         )
 
     elif protocol == "HST_Server":
-        support_list, _, _, _ = HST_Server(
+        support_list, _, estimate_dist, _ = HST_Server(
             X=X,
             ratio=ratio,
             domain=domain,
@@ -115,7 +115,7 @@ def generate_perturbed_data(
     labels = np.zeros(n)
     labels[num_benign:] = 1
 
-    return support_list, labels
+    return support_list, labels, REAL_DIST, estimate_dist
 
 
 def apply_pca_fixed(support_list: np.ndarray, n_components: int = 16) -> tuple:
@@ -240,13 +240,79 @@ def compute_influence_features(edge_index: np.ndarray, knn_indices: np.ndarray, 
     ])
 
 
+def compute_utility_metrics(
+    support_list: np.ndarray,
+    labels: np.ndarray,
+    real_dist: np.ndarray,
+    estimate_dist_all: np.ndarray,
+    epsilon: float,
+    protocol: str,
+) -> dict:
+    """
+    Compute JS divergence and Wasserstein distance between estimated distributions
+    and the ground truth distribution Attacker + Benign and then seperate benign.
+    """
+    from scipy.spatial.distance import jensenshannon
+    from scipy.stats import wasserstein_distance
+
+    n = len(labels)
+    domain = len(real_dist)
+    num_benign = int((labels == 0).sum())
+
+    benign_mask = (labels == 0)
+    obs_counts_benign = np.sum(support_list[benign_mask], axis=0)
+
+    base_proto = 'OLH' if protocol in ('OLH', 'OLH_User', 'OLH_Server') else protocol
+
+    if base_proto == 'OUE':
+        p_OUE = 0.5
+        q_OUE = 1.0 / (math.exp(epsilon) + 1.0)
+        estimate_benign = (obs_counts_benign - num_benign * q_OUE) / max(p_OUE - q_OUE, 1e-12)
+    elif base_proto == 'OLH':
+        g = int(round(math.exp(epsilon))) + 1
+        p_olh = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
+        a = 1.0 * g / (p_olh * g - 1)
+        b_benign = 1.0 * num_benign / (p_olh * g - 1)
+        estimate_benign = a * obs_counts_benign - b_benign
+    else:
+        estimate_benign = obs_counts_benign
+
+    # Construct dist
+    def _to_prob(arr):
+        clipped = np.maximum(arr, 0.0)
+        s = np.sum(clipped)
+        if s > 0:
+            return clipped / s
+        return np.full(len(arr), 1.0 / len(arr))
+
+    p_real = _to_prob(real_dist)
+    p_all = _to_prob(estimate_dist_all) if estimate_dist_all is not None else p_real
+    p_benign = _to_prob(estimate_benign)
+
+    domain_idx = np.arange(domain)
+
+    js_all = float(jensenshannon(p_all, p_real)) if estimate_dist_all is not None else 0.0
+    js_benign = float(jensenshannon(p_benign, p_real))
+    ws_all = float(wasserstein_distance(domain_idx, domain_idx, p_all, p_real)) if estimate_dist_all is not None else 0.0
+    ws_benign = float(wasserstein_distance(domain_idx, domain_idx, p_benign, p_real))
+
+    return {
+        'utility_js_all': js_all,
+        'utility_js_benign': js_benign,
+        'utility_ws_all': ws_all,
+        'utility_ws_benign': ws_benign,
+    }
+
+
 def build_graph_data(
     support_list: np.ndarray,
     labels: np.ndarray,
     epsilon: float,
     pca_dim: int = 16,
     knn_k: int = 10,
-    metadata: dict = None
+    metadata: dict = None,
+    real_dist: np.ndarray = None,
+    estimate_dist_all: np.ndarray = None,
 ) -> Data:
     if metadata is None:
         metadata = {}
@@ -260,14 +326,24 @@ def build_graph_data(
 
     eps_feat = np.full((n, 1), float(epsilon))
 
-    # Concat all node features: pca_features (pca_dim), density (4), influence (3), epsilon (1)
     x_numpy = np.hstack([pca_features, density_feats, influence_feats, eps_feat])
 
     x_tensor = torch.tensor(x_numpy, dtype=torch.float32)
     edge_index_tensor = torch.tensor(edge_index, dtype=torch.long)
     y_tensor = torch.tensor(labels, dtype=torch.float32)
 
-    # Final feature vector
+    utility_metrics = {'utility_js_all': 0.0, 'utility_js_benign': 0.0, 'utility_ws_all': 0.0, 'utility_ws_benign': 0.0}
+    if real_dist is not None:
+        protocol_name = metadata.get('protocol', 'OUE')
+        utility_metrics = compute_utility_metrics(
+            support_list=support_list,
+            labels=labels,
+            real_dist=real_dist,
+            estimate_dist_all=estimate_dist_all,
+            epsilon=epsilon,
+            protocol=protocol_name,
+        )
+
     data = Data(
         x=x_tensor,
         edge_index=edge_index_tensor,
@@ -278,7 +354,11 @@ def build_graph_data(
         ratio=float(metadata.get('ratio', 0.0)),
         target_set_size=int(metadata.get('target_set_size', 0)),
         splits=int(metadata.get('splits', 0)),
-        pca_variance_explained=explained_variance
+        pca_variance_explained=explained_variance,
+        utility_js_all=float(utility_metrics['utility_js_all']),
+        utility_js_benign=float(utility_metrics['utility_js_benign']),
+        utility_ws_all=float(utility_metrics['utility_ws_all']),
+        utility_ws_benign=float(utility_metrics['utility_ws_benign']),
     )
 
     return data

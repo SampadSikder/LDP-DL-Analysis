@@ -18,6 +18,7 @@ from config import (
     DEFAULT_GNN_HIDDEN_DIM,
     DEFAULT_GNN_NUM_HEADS,
     DEFAULT_GNN_LAMBDA_AGG,
+    DEFAULT_GNN_LAMBDA_UTILITY,
     DEFAULT_GNN_PATIENCE,
     DEFAULT_GNN_K_FOLDS,
     DEFAULT_GNN_BATCH_SIZE,
@@ -101,6 +102,27 @@ def parse_args():
         help='Aggregation loss weight (lambda)',
     )
     parser.add_argument(
+        '--lambda-utility',
+        type=float,
+        default=DEFAULT_GNN_LAMBDA_UTILITY,
+        help='Utility loss weight (lambda_utility)',
+    )
+    parser.add_argument(
+        '--utility-metric',
+        type=str,
+        default='js',
+        choices=['js', 'wasserstein'],
+        help='Metric for utility loss calculation',
+    )
+    parser.add_argument(
+        '--pos-weight',
+        type=str,
+        default='auto',
+        help='Positive class weight for BCE loss. '
+             "'auto' computes neg/pos ratio from data, "
+             "or provide a float",
+    )
+    parser.add_argument(
         '--batch-size', '-b',
         type=int,
         default=DEFAULT_GNN_BATCH_SIZE,
@@ -111,6 +133,12 @@ def parse_args():
         type=int,
         default=DEFAULT_GNN_PATIENCE,
         help='Early stopping patience (epochs)',
+    )
+    parser.add_argument(
+        '--threshold',
+        type=float,
+        default=0.5,
+        help='Classification threshold for predictions (lower = more attacker predictions)',
     )
 
     # Initialization
@@ -126,7 +154,7 @@ def parse_args():
     parser.add_argument(
         '--k-folds',
         type=int,
-        default=0,
+        default=5,
         help='Number of folds for k-fold CV (0 to skip)',
     )
     parser.add_argument(
@@ -134,7 +162,14 @@ def parse_args():
         type=float,
         nargs='+',
         default=None,
-        help='Lambda (agg loss weight) values to search (e.g. --hp-lambda-agg 0.05 0.1 0.2)',
+        help='Lambda agg values to search',
+    )
+    parser.add_argument(
+        '--hp-lambda-utility',
+        type=float,
+        nargs='+',
+        default=None,
+        help='Lambda utility values to search',
     )
     parser.add_argument(
         '--hp-num-heads',
@@ -314,8 +349,10 @@ def main():
     # ── Hyperparameter selection via k-fold CV ──────────────────────────
     # Resolved training params — may be overridden by HP search below
     best_lambda_agg = args.lambda_agg
+    best_lambda_utility = args.lambda_utility
     best_init_method = args.init_method
     best_model_kwargs = dict(model_kwargs)
+    pos_weight_arg = None if args.pos_weight == 'auto' else float(args.pos_weight)
 
     if args.k_folds > 0:
         model_class = type(get_model(args.model, **model_kwargs))
@@ -331,11 +368,15 @@ def main():
                 batch_size=args.batch_size,
                 learning_rate=args.lr,
                 lambda_agg=args.lambda_agg,
+                lambda_utility=args.lambda_utility,
+                utility_metric=args.utility_metric,
                 patience=args.patience,
                 init_method=args.init_method,
                 model_type=args.model,
                 device=device,
                 seed=args.seed,
+                pos_weight=pos_weight_arg,
+                threshold=args.threshold,
             )
 
             if args.output_dir:
@@ -352,6 +393,11 @@ def main():
                 hp_grid['lambda_agg'] = args.hp_lambda_agg
             elif 'lambda_agg' in DEFAULT_GNN_HP_GRID:
                 hp_grid['lambda_agg'] = DEFAULT_GNN_HP_GRID['lambda_agg']
+
+            if args.hp_lambda_utility is not None:
+                hp_grid['lambda_utility'] = args.hp_lambda_utility
+            elif 'lambda_utility' in DEFAULT_GNN_HP_GRID:
+                hp_grid['lambda_utility'] = DEFAULT_GNN_HP_GRID['lambda_utility']
 
             if args.model == 'gat':
                 if args.hp_num_heads is not None:
@@ -379,11 +425,16 @@ def main():
                 seed=args.seed,
                 base_learning_rate=args.lr,
                 base_lambda_agg=args.lambda_agg,
+                base_lambda_utility=args.lambda_utility,
+                utility_metric=args.utility_metric,
+                pos_weight=pos_weight_arg,
+                threshold=args.threshold,
             )
 
             best_config = search_results['best_config']
 
             best_lambda_agg = best_config.get('lambda_agg', args.lambda_agg)
+            best_lambda_utility = best_config.get('lambda_utility', args.lambda_utility)
             best_init_method = best_config.get('init_method', args.init_method)
             if 'num_heads' in best_config and args.model == 'gat':
                 best_model_kwargs['num_heads'] = best_config['num_heads']
@@ -412,9 +463,10 @@ def main():
     print("=" * 70)
     if args.k_folds > 0:
         print(f"  Using best HP config from CV search:")
-        print(f"    Learning rate: {args.lr}")
-        print(f"    Lambda (agg):  {best_lambda_agg}")
-        print(f"    Model kwargs:  {best_model_kwargs}")
+        print(f"    Learning rate:  {args.lr}")
+        print(f"    Lambda (agg):   {best_lambda_agg}")
+        print(f"    Lambda (util):  {best_lambda_utility} ({args.utility_metric})")
+        print(f"    Model kwargs:   {best_model_kwargs}")
 
     splits = dataset.stratified_split(
         test_ratio=args.test_ratio,
@@ -445,8 +497,12 @@ def main():
         device=device,
         learning_rate=args.lr,
         lambda_agg=best_lambda_agg,
+        lambda_utility=best_lambda_utility,
+        utility_metric=args.utility_metric,
         patience=args.patience,
         model_type=args.model,
+        pos_weight=pos_weight_arg,
+        threshold=args.threshold,
     )
 
     history = trainer.fit(
