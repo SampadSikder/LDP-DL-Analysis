@@ -130,11 +130,12 @@ class GNNTrainer:
         epoch_agg_loss = 0.0
         epoch_util_loss = 0.0
         num_batches = 0
+        all_probs: list = []
 
         for batch in train_loader:
             batch = batch.to(self.device, non_blocking=True)
 
-            self.optimizer.zero_grad(set_to_none=True)
+            self.optimizer.zero_grad(set_to_none=True) #Non recurrent
 
             batch_idx, utility_all, utility_benign = self._extract_utility_tensors(batch)
 
@@ -155,17 +156,31 @@ class GNNTrainer:
             self._scaler.step(self.optimizer)
             self._scaler.update()
 
+            with torch.no_grad():
+                probs = torch.sigmoid(logits.detach().float()).flatten()
+                all_probs.append(probs.cpu())
+
             epoch_loss += loss_dict['total']
             epoch_cls_loss += loss_dict['cls']
             epoch_agg_loss += loss_dict['agg']
             epoch_util_loss += loss_dict.get('utility', 0.0)
             num_batches += 1
 
+        all_probs_t = torch.cat(all_probs)
+        pred_min  = all_probs_t.min().item()
+        pred_max  = all_probs_t.max().item()
+        pred_mean = all_probs_t.mean().item()
+        pred_pos_frac = (all_probs_t > self.threshold).float().mean().item()
+
         return {
             'train_loss': epoch_loss / max(num_batches, 1),
             'train_cls_loss': epoch_cls_loss / max(num_batches, 1),
             'train_agg_loss': epoch_agg_loss / max(num_batches, 1),
             'train_util_loss': epoch_util_loss / max(num_batches, 1),
+            'pred_min': pred_min,
+            'pred_max': pred_max,
+            'pred_mean': pred_mean,
+            'pred_pos_frac': pred_pos_frac,
         }
 
     @torch.no_grad()
@@ -295,6 +310,13 @@ class GNNTrainer:
                     f"Val F1: {val_metrics['val_f1']:.4f} | "
                     f"LR: {current_lr:.6f}"
                     f"{' *' if patience_counter == 0 else ''}"
+                )
+                print(
+                    f"             Pred dist → "
+                    f"min={train_metrics['pred_min']:.3f}  "
+                    f"max={train_metrics['pred_max']:.3f}  "
+                    f"mean={train_metrics['pred_mean']:.3f}  "
+                    f"frac>{self.threshold:.2f}={train_metrics['pred_pos_frac']:.4f}"
                 )
 
             if patience_counter >= self.patience:

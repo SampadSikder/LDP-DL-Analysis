@@ -82,11 +82,11 @@ DEFAULT_GNN_LAMBDA_UTILITY = 0.1
 DEFAULT_GNN_PATIENCE = 10
 DEFAULT_GNN_K_FOLDS = 5
 DEFAULT_GNN_BATCH_SIZE = 32
-DEFAULT_GNN_INPUT_DIM = 40  # 32 PCA + 4 density + 3 influence + 1 epsilon
+DEFAULT_GNN_INPUT_DIM = 44  # 32 PCA + 4 density + 3 influence + 1 epsilon + 4 user stats
 
 DEFAULT_GNN_HP_GRID = {
     'lambda_agg':      [0.05, 0.1, 0.2],
-    'lambda_utility':  [0.5, 0.1, 0.2],
+    'lambda_utility':  [0.01, 0.1, 0.2],
     'num_heads':       [2, 4, 8],
-    'init_method':     ['xavier_uniform', 'kaiming', 'orthogonal'],
+    'init_method':     ['orthogonal', 'xavier_uniform', 'kaiming']
 }

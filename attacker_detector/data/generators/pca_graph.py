@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
 import torch
 from torch_geometric.data import Data
+from scipy.stats import binom, rankdata, chi2
 
 from .distributions import (
     generate_zipf_dist,
@@ -62,12 +63,12 @@ def generate_perturbed_data(
         Y = np.zeros(n)
 
         if olh_setting == 'user':
-            support_list, _, estimate_dist, _ = build_support_list_1_OLH(
+            support_list, one_list, estimate_dist, _ = build_support_list_1_OLH(
                 domain, Y, n, User_Seed, ratio, g, target_set,
                 p, splits, h_ao, epsilon, processor=processors
             )
         else:
-            support_list, _, estimate_dist, _ = build_support_list_1_OLH_Server(
+            support_list, one_list, estimate_dist, _ = build_support_list_1_OLH_Server(
                 domain, Y, n, User_Seed, ratio, g, target_set,
                 p, splits, h_ao, epsilon, processor=processors
             )
@@ -84,10 +85,10 @@ def generate_perturbed_data(
             splits=splits,
             num_processes=processors
         )
-        support_list, _, estimate_dist, _ = build_support_list_1_OUE(Y_data, n, epsilon)
+        support_list, one_list, estimate_dist, _ = build_support_list_1_OUE(Y_data, n, epsilon)
 
     elif protocol == "HST_User":
-        support_list, _, estimate_dist, _ = HST_Users(
+        support_list, one_list, estimate_dist, _ = HST_Users(
             X=X,
             ratio=ratio,
             domain=domain,
@@ -99,7 +100,7 @@ def generate_perturbed_data(
         )
 
     elif protocol == "HST_Server":
-        support_list, _, estimate_dist, _ = HST_Server(
+        support_list, one_list, estimate_dist, _ = HST_Server(
             X=X,
             ratio=ratio,
             domain=domain,
@@ -115,7 +116,7 @@ def generate_perturbed_data(
     labels = np.zeros(n)
     labels[num_benign:] = 1
 
-    return support_list, labels, REAL_DIST, estimate_dist
+    return support_list, labels, REAL_DIST, estimate_dist, one_list
 
 
 def apply_pca_fixed(support_list: np.ndarray, n_components: int = 16) -> tuple:
@@ -313,11 +314,13 @@ def build_graph_data(
     metadata: dict = None,
     real_dist: np.ndarray = None,
     estimate_dist_all: np.ndarray = None,
+    one_list: np.ndarray = None,
 ) -> Data:
     if metadata is None:
         metadata = {}
 
     pca_features, explained_variance = apply_pca_fixed(support_list, n_components=pca_dim)
+    print(f"[PCA] Completed. Dimensions retained: {pca_dim}. Explained variance ratio: {explained_variance:.6f}")
     edge_index, knn_distances, knn_indices = build_knn_graph(pca_features, k=knn_k)
 
     n = len(labels)
@@ -326,7 +329,65 @@ def build_graph_data(
 
     eps_feat = np.full((n, 1), float(epsilon))
 
-    x_numpy = np.hstack([pca_features, density_feats, influence_feats, eps_feat])
+    if one_list is None:
+        if metadata.get('protocol', '').startswith('HST'):
+            one_list = np.full(n, support_list.shape[1] / 2.0)
+        else:
+            one_list = np.sum(support_list, axis=1)
+
+    protocol = metadata.get('protocol', 'OUE')
+    domain = support_list.shape[1]
+
+    if protocol == 'OUE':
+        p = 0.5
+        q = 1.0 / (math.exp(epsilon) + 1.0)
+        p_binomial = (p + (domain - 1) * q) / domain
+        expected_ones = p + (domain - 1) * q
+    elif protocol in ('OLH', 'OLH_User', 'OLH_Server'):
+        g = int(round(math.exp(epsilon))) + 1
+        p = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
+        q = 1.0 / g
+        p_binomial = (p + (domain - 1) * q) / domain
+        expected_ones = p + (domain - 1) * q
+    elif protocol in ('HST_User', 'HST_Server'):
+        p_binomial = 0.5
+        expected_ones = domain / 2.0
+    else:
+        raise ValueError(f"Unknown protocol: {protocol}")
+
+    # Absolute deviation from expected number of ones
+    deviations = np.abs(one_list - expected_ones)
+
+    # Goodness-of-fit chi-square test (1 degree of freedom: ones vs zeros)
+    E1 = max(expected_ones, 1e-10)
+    E0 = max(domain - expected_ones, 1e-10)
+    chisq = ((one_list - E1) ** 2) * (1.0 / E1 + 1.0 / E0)
+    log_p = chi2.logsf(chisq, df=1)
+    neg_log_p = -log_p
+    neg_log_p = np.nan_to_num(neg_log_p, nan=1000.0, posinf=1000.0, neginf=0.0) #Clip
+
+    # Percentile rank of deviation relative to graph population
+    ranks = rankdata(deviations, method='average')
+    percentiles = (ranks - 1.0) / max(len(deviations) - 1.0, 1.0)
+
+    # Z-score of deviation relative to graph population
+    z_scores = (deviations - np.mean(deviations)) / (np.std(deviations) + 1e-10)
+
+    deviations_feat = deviations.reshape(-1, 1)
+    p_values_feat = neg_log_p.reshape(-1, 1)
+    percentiles_feat = percentiles.reshape(-1, 1)
+    z_scores_feat = z_scores.reshape(-1, 1)
+
+    x_numpy = np.hstack([
+        pca_features,
+        density_feats,
+        influence_feats,
+        eps_feat,
+        deviations_feat,
+        p_values_feat,
+        percentiles_feat,
+        z_scores_feat
+    ])
 
     x_tensor = torch.tensor(x_numpy, dtype=torch.float32)
     edge_index_tensor = torch.tensor(edge_index, dtype=torch.long)

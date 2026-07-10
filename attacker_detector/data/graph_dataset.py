@@ -15,11 +15,22 @@ class GraphDatasetLoader:
         - PyG DataLoader creation for batched trainin
     """
 
-    def __init__(self, pt_path: str, max_graphs: Optional[int] = None):
+    def __init__(
+        self,
+        pt_path: str,
+        max_graphs: Optional[int] = None,
+        normalize: bool = True,
+        epsilon_col: int = 39,
+    ):
         self.pt_path = pt_path
         self._graphs: List[Data] = []
         self._loaded = False
         self.max_graphs = max_graphs
+        self.normalize = normalize
+        self.epsilon_col = epsilon_col
+        # Set after loading when normalize=True
+        self.feature_mean: Optional[np.ndarray] = None
+        self.feature_std: Optional[np.ndarray] = None
 
     def _ensure_loaded(self):
         if not self._loaded:
@@ -35,7 +46,34 @@ class GraphDatasetLoader:
             self._graphs = raw
             self._loaded = True
             print(f"  Loaded {len(self._graphs)} graphs")
+
+            if self.epsilon_col >= 0:
+                self._drop_epsilon_col()
+            if self.normalize:
+                self._normalize_features()
+
             self._print_summary()
+
+    def _drop_epsilon_col(self) -> None:
+        col = self.epsilon_col
+        for g in self._graphs:
+            x = g.x  # (N, F)
+            g.x = torch.cat([x[:, :col], x[:, col + 1:]], dim=1)
+        print(f"  Dropped epsilon column (index {col}) from x "
+              f"new feature dim: {self._graphs[0].x.shape[1]}")
+
+    def _normalize_features(self) -> None:
+        all_x = torch.cat([g.x for g in self._graphs], dim=0).numpy()  # (total_N, F)
+        self.feature_mean = all_x.mean(axis=0, keepdims=True)           # (1, F)
+        self.feature_std  = all_x.std(axis=0, keepdims=True)            # (1, F)
+        self.feature_std = np.maximum(self.feature_std, 1e-8)
+
+        mean_t = torch.tensor(self.feature_mean, dtype=torch.float32)
+        std_t  = torch.tensor(self.feature_std,  dtype=torch.float32)
+        for g in self._graphs:
+            g.x = (g.x - mean_t) / std_t
+        print(f"  Normalized {all_x.shape[1]} feature columns "
+              f"(z-score, global mean/std over {all_x.shape[0]:,} nodes)")
 
     def _print_summary(self):
         if not self._graphs:
