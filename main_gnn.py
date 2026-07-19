@@ -522,7 +522,7 @@ def main():
         return
 
     print("\n" + "=" * 70)
-    print("Final Training (Train+Val → Test)")
+    print("Final Training ( Train+Val → Test)")
     print("=" * 70)
     if args.k_folds > 0:
         print(f"  Using best HP config from CV search:")

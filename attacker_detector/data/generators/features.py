@@ -1,173 +1,217 @@
-"""DiffStats-style feature extraction for user-level attacker detection."""
-
 import math
 import numpy as np
-from scipy.stats import binom, wasserstein_distance
-from scipy.spatial.distance import jensenshannon
+from scipy.stats import chi2, rankdata
+
+FEATURE_NAMES = [
+    'num_ones',
+    'chisq',
+    'neg_log_p',
+    'deviation',
+    'deviation_percentile',
+    'deviation_zscore',
+    'mean_z_initial',
+    'max_abs_z_initial',
+    'positional_chisq_initial',
+    'overlap_count_initial',
+    'overlap_ratio_initial',
+    'mean_z_robust',
+    'max_abs_z_robust',
+    'positional_chisq_robust',
+    'overlap_count_robust',
+    'overlap_ratio_robust',
+    'entropy',
+    'max_support',
+]
 
 
-def extract_user_level_features_diffstats_style(support_list, ideal_support_list,
-                                                  one_list, ideal_one_list,
-                                                  epsilon, protocol, domain, n):
-    """
-    Extract features following DiffStats methodology:
-    1. Detect anomalous k-values at distribution level
-    2. Flag users with those k-values
-    3. Differentiate attackers from benign users with same k-value
-    """
-
-    # Setup protocol parameters
+def _protocol_params(protocol: str, epsilon: float, domain: int):
     if protocol == 'OUE':
-        p = 1 / 2
-        q = 1 / (math.exp(epsilon) + 1)
+        p = 0.5
+        q = 1.0 / (math.exp(epsilon) + 1.0)
         expected_ones = p + (domain - 1) * q
-        p_binomial = (1 / domain) * (p + (domain - 1) * q)
-    elif protocol == 'OLH':
+    elif protocol in ('OLH', 'OLH_User', 'OLH_Server'):
         g = int(round(math.exp(epsilon))) + 1
         p = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
-        q = 1 / g
+        q = 1.0 / g
         expected_ones = p + (domain - 1) * q
-        p_binomial = (1 / domain) * (p + (domain - 1) * q)
     elif protocol in ('HST_User', 'HST_Server'):
-        p_binomial = 1 / 2
-        expected_ones = domain / 2
+        p = math.exp(epsilon) / (math.exp(epsilon) + 1.0)
+        q = 1.0 / (math.exp(epsilon) + 1.0)
+        expected_ones = domain / 2.0
     else:
         raise ValueError(f"Unknown protocol: {protocol}")
+    return p, q, expected_ones
 
-    k_values, k_counts = np.unique(one_list, return_counts=True)
-    k_values = k_values.astype(int)
-    observed_freq = k_counts / len(one_list)
 
-    theoretical_freq = np.array([binom.pmf(k, domain, p_binomial) for k in k_values])
+def _compute_positional_features(
+    support_binary: np.ndarray,
+    pi_hat_j: np.ndarray,
+    p: float,
+    q: float,
+    n: int,
+    domain: int,
+):
+    # Analytical expected per-item report probability
+    E_bit_j = pi_hat_j * p + (1.0 - pi_hat_j) * q          
+    Var_bit_j = E_bit_j * (1.0 - E_bit_j)                  
+    std_bit_j = np.sqrt(np.maximum(Var_bit_j, 1e-12))       
 
-    k_discrepancies = np.abs(observed_freq - theoretical_freq)
+    # z-score for each user × item: z_ij = (observed_bit - E_bit_j) / std
+    z_matrix = (support_binary.astype(np.float64) - E_bit_j[np.newaxis, :]) / std_bit_j[np.newaxis, :]
 
-    k_to_discrepancy = dict(zip(k_values, k_discrepancies))
-    k_to_observed_freq = dict(zip(k_values, observed_freq))
-    k_to_theoretical_freq = dict(zip(k_values, theoretical_freq))
+    num_reported = support_binary.sum(axis=1).astype(np.float64) 
+    num_reported_safe = np.maximum(num_reported, 1.0)
 
-    # Calculate item probabilities from ideal distribution
-    item_probabilities = np.mean(ideal_support_list, axis=0)  # (domain,)
-    item_probabilities = item_probabilities / (np.sum(item_probabilities) + 1e-10)
+    # Aggregate over reported items only
+    z_reported = z_matrix * support_binary  
 
-    # Sort items by probability
-    sorted_item_indices = np.argsort(item_probabilities)[::-1]
+    mean_z = z_reported.sum(axis=1) / num_reported_safe
+    abs_z = np.abs(z_matrix)
+    max_abs_z = abs_z.max(axis=1)
+    positional_chisq = (z_reported ** 2).sum(axis=1)
 
-    features_list = []
+    anomalous = (abs_z > 2.0).astype(np.float64) * support_binary
+    overlap_count = anomalous.sum(axis=1)
+    overlap_ratio = overlap_count / num_reported_safe
 
-    for i in range(n):
-        user_features = []
+    positional_feats = np.column_stack([
+        mean_z,
+        max_abs_z,
+        positional_chisq,
+        overlap_count,
+        overlap_ratio,
+    ])
 
-        num_ones = one_list[i]
-        k_int = int(num_ones)
+    return positional_feats, positional_chisq
 
-        # F1: The k-value itself
-        user_features.append(num_ones)
 
-        # F2: Discrepancy of this k-value from theoretical distribution
-        k_discrepancy = k_to_discrepancy.get(k_int, 0)
-        user_features.append(k_discrepancy)
+def _estimate_pi_hat(support_binary: np.ndarray, p: float, q: float):
+    observed_freq_j = support_binary.mean(axis=0)  
+    denom = p - q
+    if abs(denom) < 1e-12:
+        return observed_freq_j  
+    pi_hat_j = np.clip((observed_freq_j - q) / denom, 0.0, 1.0)
+    return pi_hat_j
 
-        # F3: Observed frequency of this k-value (how common is it?)
-        k_obs_freq = k_to_observed_freq.get(k_int, 0)
-        user_features.append(k_obs_freq)
 
-        # F4: Theoretical frequency of this k-value
-        k_theo_freq = k_to_theoretical_freq.get(k_int, 0)
-        user_features.append(k_theo_freq)
+def extract_user_level_features(
+    support_list: np.ndarray,
+    one_list: np.ndarray,
+    epsilon: float,
+    protocol: str,
+    domain: int,
+    n: int,
+    robust_iterations: int = 2,
+) -> tuple:
+    """
+    Returns
+    -------
+    features : ndarray (n, 18)
+        Feature matrix.
+    metadata : dict
+        Per-graph metadata: pi_hat, p, q, epsilon, protocol.
+    """
+    p, q, expected_ones = _protocol_params(protocol, epsilon, domain)
 
-        # F5: Ratio of observed to theoretical frequency
-        freq_ratio = k_obs_freq / (k_theo_freq + 1e-10)
-        user_features.append(freq_ratio)
-
-        # F6: Is this k-value in the top-N most discrepant values?
-        top_n_discrepant = 10
-        discrepancy_threshold = sorted(k_discrepancies, reverse=True)[min(top_n_discrepant-1, len(k_discrepancies)-1)]
-        is_anomalous_k = 1 if k_discrepancy >= discrepancy_threshold else 0
-        user_features.append(is_anomalous_k)
-
-        user_reported_items = np.where(support_list[i] > 0)[0]
-
-        item_counts = np.sum(support_list, axis=0)
-        expected_item_counts = n * item_probabilities
-        item_frequency_ratio = item_counts / (expected_item_counts + 1e-10)
-
-        anomaly_threshold = 1.5  # Items appearing 50% more than expected
-        anomalous_items = set(np.where(item_frequency_ratio > anomaly_threshold)[0])
-
-        # F7: Overlap with anomalous items (count)
-        overlap_anomalous_items = len(set(user_reported_items) & anomalous_items)
-        user_features.append(overlap_anomalous_items)
-
-        # F8: Overlap ratio with anomalous items
-        overlap_anomalous_ratio = overlap_anomalous_items / (len(user_reported_items) + 1e-10)
-        user_features.append(overlap_anomalous_ratio)
-
-        # F9: Mean frequency ratio of reported items
-        if len(user_reported_items) > 0:
-            mean_freq_ratio = np.mean(item_frequency_ratio[user_reported_items])
-        else:
-            mean_freq_ratio = 0
-        user_features.append(mean_freq_ratio)
-        # F10: Max frequency ratio of reported items (most anomalous item)
-        if len(user_reported_items) > 0:
-            max_freq_ratio = np.max(item_frequency_ratio[user_reported_items])
-        else:
-            max_freq_ratio = 0
-        user_features.append(max_freq_ratio)
-
-        # F12: Support diversity (entropy of support distribution)
-        support_probs = support_list[i] / (num_ones + 1e-10)
-        support_probs = support_probs[support_probs > 0]
-        if len(support_probs) > 0:
-            entropy = -np.sum(support_probs * np.log(support_probs + 1e-10))
-        else:
-            entropy = 0
-        user_features.append(entropy)
-
-        # F13: Max support value (attackers may concentrate on fewer items)
-        max_support = np.max(support_list[i])
-        user_features.append(max_support)
-
-        # F15: Theoretical probability of this k-value
-        theoretical_prob_k = binom.pmf(k_int, domain, p_binomial)
-        user_features.append(theoretical_prob_k)
-
-        # F16: Log likelihood
-        log_likelihood = np.log(theoretical_prob_k + 1e-10)
-        user_features.append(log_likelihood)
-
-        # F16: Deviation from expected number of ones Wasserstein Distance
-        deviation = abs(num_ones - expected_ones)
-        user_features.append(deviation)
-
-        # Create user's empirical distribution (point mass at their k-value)
-        user_k_observed = np.zeros(len(k_values))
-        k_idx = np.where(k_values == k_int)[0]
-        if len(k_idx) > 0:
-            user_k_observed[k_idx[0]] = 1.0  # Point mass at user's k-value
-        else:
-            user_k_observed = np.zeros(1)
-            user_k_observed[0] = 1.0
-
-        user_theoretical_freq = theoretical_freq.copy()
-
-        user_k_observed_norm = user_k_observed / (np.sum(user_k_observed) + 1e-10)
-        user_theoretical_freq_norm = user_theoretical_freq / (np.sum(user_theoretical_freq) + 1e-10)
-
-        # F18: Wasserstein distance
-        wass_dist_k = wasserstein_distance(
-            k_values, k_values,
-            u_weights=user_k_observed_norm,
-            v_weights=user_theoretical_freq_norm
+    # Binarize support for positional features
+    if protocol in ('HST_User', 'HST_Server'):
+        # HST: support_list = y_i * s_vectors, where s_vectors ∈ {-1, 1}.
+        # one_list = sum(s_vectors == 1, axis=1). When y_i < 0 the sign
+        # flips, so (support_list > 0) would give s_vectors == -1 instead.
+        # Detect y sign per user and recover s_vectors == 1.
+        num_positive = np.sum(support_list > 0, axis=1)
+        y_positive = (num_positive == one_list)
+        support_binary = np.where(
+            y_positive[:, np.newaxis],
+            (support_list > 0).astype(np.float64),
+            (support_list < 0).astype(np.float64),
         )
-        user_features.append(wass_dist_k)
+    else:
+        support_binary = support_list.astype(np.float64)
 
-        # F19: JS divergence
-        js_divergence_k = jensenshannon(user_k_observed_norm, user_theoretical_freq_norm)
-        user_features.append(js_divergence_k)
+    E1 = max(expected_ones, 1e-10)
+    E0 = max(domain - expected_ones, 1e-10)
 
-        features_list.append(user_features)
+    num_ones = one_list.astype(np.float64)
+
+    # Chi-square statistic
+    chisq = ((num_ones - E1) ** 2) * (1.0 / E1 + 1.0 / E0)
+
+    # neg_log_p: use logsf directly to avoid underflow
+    log_sf = chi2.logsf(chisq, df=1)
+    neg_log_p = -log_sf
+    # Cap at 99.9th percentile of finite values (instead of arbitrary 1000)
+    finite_mask = np.isfinite(neg_log_p)
+    if finite_mask.any():
+        cap = np.percentile(neg_log_p[finite_mask], 99.9)
+        neg_log_p = np.where(finite_mask, np.minimum(neg_log_p, cap), cap)
+    else:
+        neg_log_p = np.zeros_like(neg_log_p)
+
+    # Deviation
+    deviation = np.abs(num_ones - E1)
+
+    ranks = rankdata(deviation, method='average')
+    deviation_percentile = (ranks - 1.0) / max(n - 1.0, 1.0)
+
+    dev_mean = np.mean(deviation)
+    dev_std = np.std(deviation)
+    deviation_zscore = (deviation - dev_mean) / max(dev_std, 1e-10)
+
+    pi_hat_initial = _estimate_pi_hat(support_binary, p, q)
+    initial_pos_feats, initial_user_chisq = _compute_positional_features(
+        support_binary, pi_hat_initial, p, q, n, domain
+    )
+
+    if robust_iterations > 0:
+        pi_hat_robust = pi_hat_initial.copy()
+        user_weights = np.ones(n, dtype=np.float64)
+
+        for _iter in range(robust_iterations):
+            threshold = np.percentile(initial_user_chisq, 90)
+            user_weights = (initial_user_chisq <= threshold).astype(np.float64)
+
+            if user_weights.sum() > 0:
+                weighted_freq = (support_binary * user_weights[:, np.newaxis]).sum(axis=0) / user_weights.sum()
+                denom = p - q
+                if abs(denom) >= 1e-12:
+                    pi_hat_robust = np.clip((weighted_freq - q) / denom, 0.0, 1.0)
+
+            robust_pos_feats, initial_user_chisq = _compute_positional_features(
+                support_binary, pi_hat_robust, p, q, n, domain
+            )
+
+        pi_hat_final = pi_hat_robust
+    else:
+        robust_pos_feats = initial_pos_feats.copy()
+        pi_hat_final = pi_hat_initial
 
 
-    return np.array(features_list)
+    support_probs = support_binary / np.maximum(support_binary.sum(axis=1, keepdims=True), 1e-10)
+    log_probs = np.where(support_probs > 0, np.log(support_probs + 1e-10), 0.0)
+    entropy = -np.sum(support_probs * log_probs, axis=1)
+
+    max_support = np.max(support_list, axis=1)
+
+    features = np.column_stack([
+        num_ones,                     # 1
+        chisq,                        # 2
+        neg_log_p,                    # 3
+        deviation,                    # 4
+        deviation_percentile,         # 5
+        deviation_zscore,             # 6
+        initial_pos_feats,            # 7-11  (5 cols)
+        robust_pos_feats,             # 12-16 (5 cols)
+        entropy,                      # 17
+        max_support,                  # 18
+    ])
+
+    metadata = {
+        'pi_hat': pi_hat_final,
+        'p': p,
+        'q': q,
+        'epsilon': epsilon,
+        'protocol': protocol,
+    }
+
+    return features, metadata

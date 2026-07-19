@@ -81,6 +81,7 @@ venv.bak/
 *.ckpt
 results/
 outputs/
+output/
 checkpoints/
 
 # Data files

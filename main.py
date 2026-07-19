@@ -1,19 +1,28 @@
 #!/usr/bin/env python
 """
-Attacker Detection CLI - Train and evaluate attacker detection models.
 
 Usage:
-    python main.py --data-path /path/to/dataset.csv --model mlp
-    python main.py --data-path data.csv --model mlp --epochs 10 --lr 0.0005
+    # Conventional (random split), no CV:
+    python main.py --data-path /path/to/output_dir --model mlp --epochs 10
+
+    # K-fold cross-validation only:
+    python main.py --data-path /path/to/output_dir --model mlp --k-folds 5 --cv-only
+
+    # K-fold CV + final training + test evaluation:
+    python main.py --data-path /path/to/output_dir --model mlp --k-folds 5 --patience 10
+
+    # Cross-dataset generalization with CV:
+    python main.py --data-path /path/to/output_dir --model mlp \\
+        --training-method cross --train-dataset zipf --test-dataset emoji --k-folds 5
 """
 
 import argparse
 import os
-import torch
+import numpy as np
 import pandas as pd
+import torch
 
 from config import (
-    TRAINING_FEATURES,
     DEFAULT_EPOCHS,
     DEFAULT_BATCH_SIZE,
     DEFAULT_LEARNING_RATE,
@@ -23,23 +32,27 @@ from config import (
     DATASET_TYPES,
 )
 from attacker_detector.models import get_model
-from attacker_detector.data import load_data, prepare_data, prepare_data_by_dataset_type
+from attacker_detector.data import (
+    load_npy_dataset,
+    prepare_npy_data,
+    prepare_npy_data_by_dataset_type,
+)
 from attacker_detector.training import Trainer
+from attacker_detector.training.trainer import run_k_fold_cv
 from attacker_detector.analysis import run_sensitivity_analysis, plot_sensitivity_metric
 
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description='Train and evaluate attacker detection models',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    
+
     parser.add_argument(
         '--data-path', '-d',
         type=str,
         required=True,
-        help='Path to CSV dataset'
+        help='Path to dataset'
     )
     parser.add_argument(
         '--model', '-m',
@@ -48,7 +61,7 @@ def parse_args():
         choices=['mlp', 'gan', 'attention'],
         help='Model type to use'
     )
-    
+
     parser.add_argument(
         '--epochs', '-e',
         type=int,
@@ -73,7 +86,7 @@ def parse_args():
         default=DEFAULT_DROPOUT,
         help='Dropout rate'
     )
-    
+
     parser.add_argument(
         '--test-size',
         type=float,
@@ -81,12 +94,18 @@ def parse_args():
         help='Test set fraction'
     )
     parser.add_argument(
+        '--val-size',
+        type=float,
+        default=0.15,
+        help='Validation set fraction --> From train set'
+    )
+    parser.add_argument(
         '--seed',
         type=int,
         default=DEFAULT_SEED,
         help='Random seed for reproducibility'
     )
-    
+
     parser.add_argument(
         '--output-dir', '-o',
         type=str,
@@ -98,8 +117,26 @@ def parse_args():
         action='store_true',
         help='Skip sensitivity plots'
     )
-    
-    # Generalizability training settings
+
+    parser.add_argument(
+        '--k-folds',
+        type=int,
+        default=5,
+        help='Number of folds for k-fold CV'
+    )
+    parser.add_argument(
+        '--patience',
+        type=int,
+        default=10,
+        help='Early stopping patience'
+    )
+    parser.add_argument(
+        '--cv-only',
+        action='store_true',
+        default=False,
+        help='Run only k-fold CV; skip final training and test evaluation'
+    )
+
     parser.add_argument(
         '--training-method',
         type=str,
@@ -107,7 +144,7 @@ def parse_args():
         choices=['none', 'cross', 'three-way'],
         help=(
             'Training method: '
-            'none = conventional (random split across all dataset types), '
+            'none = conventional, '
             'cross = train on one dataset_type and test on another, '
             'three-way = train on one, test on another, evaluate on a third'
         )
@@ -133,10 +170,9 @@ def parse_args():
         choices=DATASET_TYPES,
         help='dataset_type used for evaluation (required for three-way)'
     )
-    
+
     args = parser.parse_args()
-    
-    # Validate training-method dependent arguments
+
     if args.training_method in ('cross', 'three-way'):
         if not args.train_dataset or not args.test_dataset:
             parser.error(
@@ -144,148 +180,219 @@ def parse_args():
                 "both --train-dataset and --test-dataset"
             )
         if args.train_dataset == args.test_dataset:
-            parser.error(
-                "--train-dataset and --test-dataset must be different"
-            )
-    
+            parser.error("--train-dataset and --test-dataset must be different")
+
     if args.training_method == 'three-way':
         if not args.eval_dataset:
-            parser.error(
-                "--training-method=three-way requires --eval-dataset"
-            )
+            parser.error("--training-method=three-way requires --eval-dataset")
         if args.eval_dataset in (args.train_dataset, args.test_dataset):
             parser.error(
                 "--eval-dataset must differ from --train-dataset and --test-dataset"
             )
-    
+
     return args
 
 
 def main():
-    """Main entry point."""
     args = parse_args()
-    
+
+    torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    
-    print(f"\nLoading data from: {args.data_path}")
-    df = load_data(args.data_path)
-    
-    print(f"\nFirst few rows:")
-    print(df.head())
-    
-    print(f"\nTraining features ({len(TRAINING_FEATURES)}): {TRAINING_FEATURES}")
+    print(f"\nLoading dataset from: {args.data_path}")
+    ds = load_npy_dataset(args.data_path)
+
+    n_features = ds.features.shape[1]
+    print(f"Feature count: {n_features}")
+    print(f"Feature names: {ds.feature_names}")
     print(f"Training method: {args.training_method}")
-    
+
+    # Hold out set
+    has_test_set = True 
+
+    use_val = args.val_size > 0
+
     if args.training_method == 'none':
-        # Conventional: random stratified split across all dataset types
-        print("\nPreparing data (conventional random split)...")
-        X_train, X_test, y_train, y_test, scaler, test_indices = prepare_data(
-            df,
-            TRAINING_FEATURES,
+        print("\nPreparing data...")
+        split = prepare_npy_data(
+            ds,
             test_size=args.test_size,
-            random_state=args.seed
+            val_size=args.val_size if use_val else 0.0,
+            random_state=args.seed,
         )
     else:
-        # Cross or three-way: filter by dataset_type
         eval_type = args.eval_dataset if args.training_method == 'three-way' else None
-        print(f"\nPreparing data (train={args.train_dataset}, test={args.test_dataset}"
-              f"{f', eval={args.eval_dataset}' if eval_type else ''})...")
-        
-        data = prepare_data_by_dataset_type(
-            df,
-            TRAINING_FEATURES,
+        print(
+            f"\nPreparing data (train={args.train_dataset}, "
+            f"test={args.test_dataset}"
+            + (f", eval={eval_type}" if eval_type else "")
+            + ")..."
+        )
+        split = prepare_npy_data_by_dataset_type(
+            ds,
             train_type=args.train_dataset,
             test_type=args.test_dataset,
             eval_type=eval_type,
-            random_state=args.seed
+            val_size=args.val_size if use_val else 0.0,
+            random_state=args.seed,
         )
-        X_train = data['X_train']
-        y_train = data['y_train']
-        X_test = data['X_test']
-        y_test = data['y_test']
-        test_indices = data['test_indices']
-        scaler = data['scaler']
-    
-    print(f"\nCreating {args.model} model...")
+
+    X_train = split['X_train']
+    y_train = split['y_train']
+
+    if args.k_folds > 0:
+        if 'X_trainval' in split:
+            X_trainval = split['X_trainval']
+            y_trainval = split['y_trainval']
+        else:
+            X_trainval = X_train
+            y_trainval = y_train
+
+        cv_results = run_k_fold_cv(
+            model_type=args.model,
+            input_dim=n_features,
+            dropout_rate=args.dropout,
+            X_trainval=X_trainval,
+            y_trainval=y_trainval,
+            n_folds=args.k_folds,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr,
+            patience=args.patience,
+            device=device,
+            seed=args.seed,
+        )
+
+        if args.output_dir:
+            os.makedirs(args.output_dir, exist_ok=True)
+            cv_df = pd.DataFrame(cv_results['fold_results'])
+            cv_path = os.path.join(args.output_dir, 'cv_results.csv')
+            cv_df.to_csv(cv_path, index=False)
+            print(f"\nCV results saved to: {cv_path}")
+
+    if args.cv_only:
+        print("\n--cv-only set, skipping final training and test evaluation.")
+        print("Done!")
+        return
+
+
+    print("\n" + "=" * 70)
+    print("Final Training")
+    print("=" * 70)
+
     model = get_model(
         args.model,
-        input_dim=len(TRAINING_FEATURES),
-        dropout_rate=args.dropout
+        input_dim=n_features,
+        dropout_rate=args.dropout,
     )
     print(model)
-    
-    trainer = Trainer(model, device, learning_rate=args.lr, model_type=args.model, epochs=args.epochs)
-    trainer.fit(X_train, y_train, epochs=args.epochs, batch_size=args.batch_size)
-    
+
+    trainer = Trainer(
+        model, device,
+        learning_rate=args.lr,
+        model_type=args.model,
+        epochs=args.epochs,
+    )
+
+    if use_val and 'X_val' in split:
+        print("Training with early stopping on validation set...")
+        train_result = trainer.fit_with_validation(
+            X_train, y_train,
+            split['X_val'], split['y_val'],
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            patience=args.patience,
+        )
+
+        if args.output_dir:
+            os.makedirs(args.output_dir, exist_ok=True)
+            history_df = pd.DataFrame(train_result['history'])
+            history_path = os.path.join(args.output_dir, 'training_history.csv')
+            history_df.to_csv(history_path, index=False)
+            print(f"Training history saved to: {history_path}")
+    else:
+        trainer.fit(X_train, y_train, epochs=args.epochs, batch_size=args.batch_size)
+
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
         model_path = os.path.join(args.output_dir, 'model.pt')
         trainer.save(model_path)
-    
-    test_label = f"Test ({args.test_dataset})" if args.training_method != 'none' else "Test"
-    trainer.evaluate(X_test, y_test, label=test_label)
-    
-    print("\nRunning Sensitivity Analysis on test set...")
-    df_test = df.iloc[test_indices].reset_index(drop=True)
-    
-    sensitivity_df = run_sensitivity_analysis(
-        model,
-        df_test,
-        scaler,
-        TRAINING_FEATURES,
-        device,
-        batch_size=4096
-    )
-    
-    print("\nSensitivity Analysis Results (Test):")
-    print(sensitivity_df.to_string(index=False))
-    
-    if args.output_dir:
-        results_path = os.path.join(args.output_dir, 'sensitivity_test_results.csv')
-        sensitivity_df.to_csv(results_path, index=False)
-        print(f"\nTest results saved to: {results_path}")
-    
-    if not args.no_plot:
-        _save_sensitivity_plots(sensitivity_df, 'test', args.output_dir)
-    
+
+    if has_test_set:
+        X_test = split['X_test']
+        y_test = split['y_test']
+        test_indices = split['test_indices']
+
+        test_label = (
+            f"Test ({args.test_dataset})"
+            if args.training_method != 'none'
+            else "Test"
+        )
+        trainer.evaluate(X_test, y_test, label=test_label)
+
+        print("\nRunning Sensitivity Analysis on test set...")
+        test_config = ds.config[test_indices]
+
+        sensitivity_df = run_sensitivity_analysis(
+            model,
+            X_test,
+            y_test,
+            device,
+            config_array=test_config,
+            batch_size=4096,
+        )
+
+        print("\nSensitivity Analysis Results:")
+        print(sensitivity_df.to_string(index=False))
+
+        if args.output_dir:
+            results_path = os.path.join(args.output_dir, 'sensitivity_test_results.csv')
+            sensitivity_df.to_csv(results_path, index=False)
+            print(f"\nTest results saved to: {results_path}")
+
+        if not args.no_plot:
+            _save_sensitivity_plots(sensitivity_df, 'test', args.output_dir)
+
+
     if args.training_method == 'three-way':
-        X_eval = data['X_eval']
-        y_eval = data['y_eval']
-        eval_indices = data['eval_indices']
-        
+        X_eval       = split['X_eval']
+        y_eval       = split['y_eval']
+        eval_indices = split['eval_indices']
+
         trainer.evaluate(X_eval, y_eval, label=f"Eval ({args.eval_dataset})")
-        
+
         print("\nRunning Sensitivity Analysis on eval set...")
-        df_eval = df.iloc[eval_indices].reset_index(drop=True)
-        
+        eval_config = ds.config[eval_indices]
+
         eval_sensitivity_df = run_sensitivity_analysis(
             model,
-            df_eval,
-            scaler,
-            TRAINING_FEATURES,
+            X_eval,
+            y_eval,
             device,
-            batch_size=4096
+            config_array=eval_config,
+            batch_size=4096,
         )
-        
+
         print("\nSensitivity Analysis Results (Eval):")
         print(eval_sensitivity_df.to_string(index=False))
-        
+
         if args.output_dir:
-            eval_results_path = os.path.join(args.output_dir, 'sensitivity_eval_results.csv')
+            eval_results_path = os.path.join(
+                args.output_dir, 'sensitivity_eval_results.csv'
+            )
             eval_sensitivity_df.to_csv(eval_results_path, index=False)
             print(f"\nEval results saved to: {eval_results_path}")
-        
+
         if not args.no_plot:
             _save_sensitivity_plots(eval_sensitivity_df, 'eval', args.output_dir)
-    
+
     print("\nDone!")
 
 
 def _save_sensitivity_plots(sensitivity_df, split_name, output_dir):
     """Save sensitivity plots for a given split (test or eval)."""
     metrics = ['F1_Score', 'Accuracy', 'Precision', 'Recall']
-    
+
     for metric in metrics:
         print(f"\nPlotting {metric.replace('_', ' ')} ({split_name})...")
         save_path = None

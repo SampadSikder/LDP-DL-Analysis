@@ -28,28 +28,38 @@ To generate LDP distributions, the real dataset files must be placed in a `datas
 
 ## Dataset Generation
 
-
-Generate LDP attack detection training data:
+Generate LDP attack detection training data. Output is a **directory** of `.npy` files with pre-normalized (z-score) features.
 
 ```bash
 # Generate with defaults
-python generate_dataset.py --output dataset.csv
+python generate_dataset.py -o output/my_dataset
 
 # Custom configuration
-python generate_dataset.py --output custom.csv \
-    --protocols OUE OLH_Server OLH_User HST_User HST_Server \
+python generate_dataset.py -o output/custom \
+    --protocols OUE OLH HST_Server \
     --epsilons 0.5 1.0 2.0 \
     --datasets zipf emoji fire \
     --ratios 0.10 0.15 0.20 \
-    --experiments 5
+    --experiments 5 \
+    --workers 4
 ```
+
+### Output Directory Format
+
+| File | Description |
+|------|-------------|
+| `features.npy` | `(N, 18)` float32 — z-score normalized feature matrix |
+| `labels.npy` | `(N,)` float32 — binary labels (0 = benign, 1 = attacker) |
+| `config.npy` | `(N, 6)` object — per-row config: `[target_set_size, attacker_ratio, protocol, splits, epsilon, dataset_type]` |
+| `norm_stats.json` | Feature means, stds, and names used for normalization |
+| `metadata.npz` | Per-graph metadata (π̂, π_true, p, q, support tensors) |
 
 ### Dataset Generation CLI Arguments
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--output`, `-o` | Output CSV file path | *required* |
-| `--protocols` | LDP protocols: `OUE`, `OLH` | `['OUE', 'OLH']` |
+| `--output`, `-o` | Output directory path | *required* |
+| `--protocols` | LDP protocols: `OUE`, `OLH`, `HST_User`, `HST_Server` | `['OUE', 'OLH']` |
 | `--epsilons` | Privacy parameters | `[0.5, 0.7, 1.0, 1.5]` |
 | `--datasets` | Dataset types: `zipf`, `emoji`, `fire` | all three |
 | `--ratios` | Attacker ratios | `[0.10, 0.15, 0.20]` |
@@ -58,7 +68,10 @@ python generate_dataset.py --output custom.csv \
 | `--experiments` | Experiments per config | 5 |
 | `--full-scale` | Use full-scale dataset sizes | False |
 | `--n` | Override number of users | None |
-| `--processors` | Parallel processes | 4 |
+| `--workers` | Outer ProcessPoolExecutor workers (OUE/HST) | 4 |
+| `--inner-processors` | Inner parallel processes per task | 4 |
+| `--save-every` | Flush to disk every N completed tasks | 50 |
+| `--robust-iterations` | Iterative robust re-estimation rounds | 2 |
 
 ## PCA Graph Dataset Generation
 
@@ -138,59 +151,82 @@ Data(
 
 
 
-## Usage
+## Training (`main.py`)
+
+Train and evaluate tabular attacker detection models on the NPY dataset directory (output of `generate_dataset.py`). Supports k-fold cross-validation, early stopping, and cross-dataset generalization.
 
 ```bash
-# Train MLP model
-python main.py --data-path dataset.csv --model mlp --epochs 5
+# Train MLP with k-fold CV + final training
+python main.py -d output/my_dataset -m mlp --epochs 20 --k-folds 5 --patience 10 -o results/
 
-# Train GAN model
-python main.py --data-path dataset.csv --model gan --epochs 10
+# CV only (no final training)
+python main.py -d output/my_dataset -m mlp --k-folds 5 --cv-only
 
-# Train Attention model
-python main.py --data-path dataset.csv --model attention --epochs 15
+# Standard training (no CV, no early stopping)
+python main.py -d output/my_dataset -m mlp --epochs 10 --k-folds 0 --val-size 0
 
-# Save outputs to directory
-python main.py --data-path dataset.csv --model mlp --output-dir ./results
-
-# Cross-dataset: train on zipf, test on emoji
-python main.py --data-path dataset.csv --model mlp \
-    --training-method cross --train-dataset zipf --test-dataset emoji
+# Cross-dataset: train on zipf, test on emoji, with CV
+python main.py -d output/my_dataset -m mlp \
+    --training-method cross --train-dataset zipf --test-dataset emoji --k-folds 5
 
 # Three-way: train on zipf, test on emoji, evaluate on fire
-python main.py --data-path dataset.csv --model mlp \
+python main.py -d output/my_dataset -m mlp \
     --training-method three-way \
     --train-dataset zipf --test-dataset emoji --eval-dataset fire
 ```
+
+### Training Pipeline
+
+1. **Load NPY dataset** from directory (features are pre-normalized)
+2. **Split data** into train / val / test (stratified)
+3. **K-fold CV** on train+val (optional, `--k-folds`)
+4. **Final training** with early stopping on val F1 (`--patience`)
+5. **Test evaluation** + sensitivity analysis with config metadata
+
 ### CLI Arguments
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--data-path`, `-d` | Path to CSV dataset | *required* |
+| `--data-path`, `-d` | Path to NPY dataset directory | *required* |
 | `--model`, `-m` | Model type: `mlp`, `gan`, `attention` | *required* |
-| `--epochs`, `-e` | Training epochs | 5 |
+| `--epochs`, `-e` | Max training epochs | 5 |
 | `--batch-size`, `-b` | Batch size | 256 |
 | `--lr` | Learning rate | 0.001 |
 | `--dropout` | Dropout rate | 0.2 |
 | `--test-size` | Test split ratio (only for `none` mode) | 0.2 |
+| `--val-size` | Validation fraction (carved from train) | 0.15 |
+| `--k-folds` | K-fold CV folds (0 to skip) | 5 |
+| `--patience` | Early stopping patience (epochs) | 10 |
+| `--cv-only` | Run only k-fold CV, skip final training | False |
 | `--seed` | Random seed | 42 |
-| `--output-dir`, `-o` | Save model/plots here | None |
+| `--output-dir`, `-o` | Save model/plots/results here | None |
 | `--no-plot` | Skip sensitivity plots | False |
 
 ### Generalizability Training
 
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--training-method` | `none` (conventional random split), `cross` (train on one dataset type, test on another), `three-way` (train/test/eval on separate types) | `none` |
-| `--train-dataset` | Dataset type for training: `zipf`, `emoji`, `fire` (required for `cross` / `three-way`) | None |
-| `--test-dataset` | Dataset type for testing: `zipf`, `emoji`, `fire` (required for `cross` / `three-way`) | None |
-| `--eval-dataset` | Dataset type for evaluation: `zipf`, `emoji`, `fire` (required for `three-way`) | None |
+| `--training-method` | `none`, `cross`, or `three-way` | `none` |
+| `--train-dataset` | Dataset type for training: `zipf`, `emoji`, `fire` | None |
+| `--test-dataset` | Dataset type for testing | None |
+| `--eval-dataset` | Dataset type for evaluation (three-way only) | None |
 
 **Training methods:**
 
-- **`none`** — Conventional training. All dataset types are mixed together and split randomly into train/test sets using `--test-size`.
-- **`cross`** — Cross-dataset generalizability. The model is trained entirely on one dataset type and tested on another (e.g., train on `zipf`, test on `emoji`).
-- **`three-way`** — Full generalizability evaluation. Train on one type, test on a second, and run an additional evaluation + sensitivity analysis on a third (e.g., train `zipf`, test `emoji`, evaluate `fire`).
+- **`none`** — Conventional training. All dataset types are mixed together and split randomly into train/val/test.
+- **`cross`** — Cross-dataset generalizability. Train on one dataset type, test on another. Val is carved from train.
+- **`three-way`** — Full generalizability evaluation. Train on one type, test on a second, evaluate on a third.
+
+### Output Files
+
+| File | Contents |
+|------|----------|
+| `model.pt` | Model checkpoint |
+| `cv_results.csv` | Per-fold metrics from k-fold CV |
+| `training_history.csv` | Per-epoch train loss + val F1/accuracy |
+| `sensitivity_test_results.csv` | Sensitivity by ε, ratio, target size, dataset type |
+| `sensitivity_eval_results.csv` | Sensitivity for eval set (three-way only) |
+| `sensitivity_*_*.png` | Sensitivity plots |
 
 ## GNN Training (`main_gnn.py`)
 

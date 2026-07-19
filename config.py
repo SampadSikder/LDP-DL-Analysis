@@ -54,7 +54,7 @@ DATASET_CONFIGS_FULL = {
     'fire':  {'domain': 296,  'n': 723090},
 }
 
-DATASET_FEATURE_NAMES = [
+DATASET_FEATURE_NAMES_V1 = [
     'num_ones', 'k_discrepancy', 'k_observed_frequency',
     'k_theoretical_frequency', 'freq_ratio', 'is_anomalous_k',
     'overlap_anomalous_items_count', 'overlap_anomalous_items_ratio',
@@ -64,6 +64,30 @@ DATASET_FEATURE_NAMES = [
     'deviation',
     'wasserstein_distance_k', 'js_divergence_k',
 ]
+
+# V2 analytical-null features (used by generate_dataset.py v2)
+DATASET_FEATURE_NAMES = [
+    'num_ones',
+    'chisq',
+    'neg_log_p',
+    'deviation',
+    'deviation_percentile',
+    'deviation_zscore',
+    'mean_z_initial',
+    'max_abs_z_initial',
+    'positional_chisq_initial',
+    'overlap_count_initial',
+    'overlap_ratio_initial',
+    'mean_z_robust',
+    'max_abs_z_robust',
+    'positional_chisq_robust',
+    'overlap_count_robust',
+    'overlap_ratio_robust',
+    'entropy',
+    'max_support',
+]
+
+DEFAULT_ROBUST_ITERATIONS = 2
 
 DATASET_CONFIG_COLUMNS = [
     'target_set_size', 'attacker_ratio', 'protocol',

@@ -1,6 +1,15 @@
 """Data module - Dataset classes and data loading utilities."""
 
-from .dataset import AttackerDataset, load_data, prepare_data, prepare_data_by_dataset_type
+from .dataset import (
+    AttackerDataset,
+    load_data, prepare_data, prepare_data_by_dataset_type,
+    NpyDataset, load_npy_dataset, prepare_npy_data, prepare_npy_data_by_dataset_type,
+)
 from .graph_dataset import GraphDatasetLoader
 
-__all__ = ['AttackerDataset', 'load_data', 'prepare_data', 'prepare_data_by_dataset_type', 'GraphDatasetLoader']
+__all__ = [
+    'AttackerDataset',
+    'load_data', 'prepare_data', 'prepare_data_by_dataset_type',
+    'NpyDataset', 'load_npy_dataset', 'prepare_npy_data', 'prepare_npy_data_by_dataset_type',
+    'GraphDatasetLoader',
+]
