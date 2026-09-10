@@ -13,6 +13,15 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from config import PARAM_DISPLAY_MAP
+from attacker_detector.data.dataset import (
+    _CONF_TARGET_SET_SIZE,
+    _CONF_ATTACKER_RATIO,
+    _CONF_PROTOCOL,
+    _CONF_SPLITS,
+    _CONF_EPSILON,
+    _CONF_DATASET_TYPE,
+    _CONF_N,
+)
 
 
 def run_sensitivity_analysis(
@@ -31,9 +40,9 @@ def run_sensitivity_analysis(
         X_test:       (N, F) float array of already-normalized features.
         y_test:       (N,) binary labels.
         device:       Torch device.
-        config_array: (N, 6) object array with columns
-                      [target_set_size, attacker_ratio, protocol,
-                       splits, epsilon, dataset_type].
+        config_array: (N, 9) object array with columns
+                      [target_set_size, attacker_ratio, protocol, splits,
+                       epsilon, dataset_type, n, experiment_id, row_in_experiment].
                       If None, per-parameter breakdown is skipped.
         batch_size:   Mini-batch size for inference.
     """
@@ -71,12 +80,16 @@ def run_sensitivity_analysis(
 
     print("Calculating sensitivity metrics...")
 
-    # Column indices match generate_dataset.py config.npy layout
+    # Named column indices (attacker_detector/data/dataset.py's _CONF_* constants)
+    # so this stays correct if config.npy's column layout changes.
     _COL_MAP = {
-        'target_set_size': (0, PARAM_DISPLAY_MAP.get('target_set_size', 'Target Set Size')),
-        'attacker_ratio':  (1, PARAM_DISPLAY_MAP.get('attacker_ratio',  'Attacker Ratio')),
-        'epsilon':         (4, PARAM_DISPLAY_MAP.get('epsilon',         'Epsilon')),
-        'dataset_type':    (5, PARAM_DISPLAY_MAP.get('dataset_type',    'Dataset Type')),
+        'target_set_size': (_CONF_TARGET_SET_SIZE, PARAM_DISPLAY_MAP.get('target_set_size', 'Target Set Size')),
+        'attacker_ratio':  (_CONF_ATTACKER_RATIO,  PARAM_DISPLAY_MAP.get('attacker_ratio',  'Attacker Ratio')),
+        'protocol':        (_CONF_PROTOCOL,        PARAM_DISPLAY_MAP.get('protocol',        'Protocol')),
+        'splits':          (_CONF_SPLITS,          PARAM_DISPLAY_MAP.get('splits',          'Splits')),
+        'epsilon':         (_CONF_EPSILON,         PARAM_DISPLAY_MAP.get('epsilon',         'Epsilon')),
+        'dataset_type':    (_CONF_DATASET_TYPE,    PARAM_DISPLAY_MAP.get('dataset_type',    'Dataset Type')),
+        'n':               (_CONF_N,               PARAM_DISPLAY_MAP.get('n',               'Number of Users')),
     }
 
     for col_name, (col_idx, display_name) in _COL_MAP.items():
@@ -113,10 +126,10 @@ def plot_sensitivity_metric(
     sns.set_style("whitegrid")
     sns.set_context("paper", font_scale=1.2)
 
-    params = ['epsilon', 'attacker_ratio', 'target_set_size']
-    labels = ['$\\epsilon$', '$\\beta$', '$r$']
+    params = ['epsilon', 'attacker_ratio', 'target_set_size', 'splits', 'n']
+    labels = ['$\\epsilon$', '$\\beta$', '$r$', 'splits', '$n$']
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, len(params), figsize=(6 * len(params), 5))
     line_color = '#1f77b4'
 
     for i, param in enumerate(params):
@@ -143,7 +156,7 @@ def plot_sensitivity_metric(
 
         ax.set_ylim(-0.05, 1.05)
 
-        if param == 'target_set_size':
+        if param in ('target_set_size', 'splits'):
             ax.set_xticks(data['Value'].unique())
 
         ax.legend(loc='lower right')

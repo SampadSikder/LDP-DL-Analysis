@@ -274,7 +274,7 @@ def process_user_seeds(i, User_Seed_noattack, Y_Nattack, domain, g):
     local_estimate = np.zeros(domain)
     user_seed = User_Seed_noattack[i]
     for v in range(domain):
-        if Y_Nattack[i] == (xxhash.xxh3_64(str(v), seed=int(user_seed)).intdigest() % g):
+        if Y_Nattack[i] == (xxhash.xxh3_64(str(v).encode(), seed=int(user_seed)).intdigest() % g):
             local_estimate[v] += 1
     # Apply the correction factor
     local_estimate = local_estimate
@@ -297,10 +297,10 @@ def find_hash_function(seed_list, target_set, domain_eliminate, g, num_map_AO):
         hash_other_projection_list = np.zeros(g)
         hash_result = None
         for item in target_set:
-            hash_result = xxhash.xxh3_64(str(item), seed=seed).intdigest() % g
+            hash_result = xxhash.xxh3_64(str(item).encode(), seed=seed).intdigest() % g
             hash_projection_list[hash_result] += 1
         for item in domain_eliminate:
-            hash_result = xxhash.xxh3_64(str(item), seed=seed).intdigest() % g
+            hash_result = xxhash.xxh3_64(str(item).encode(), seed=seed).intdigest() % g
             hash_other_projection_list[hash_result] += 1
         score = hash_projection_list - np.abs(num_map_AO - hash_projection_list - hash_other_projection_list)
         current_best_score = np.max(score)
@@ -345,7 +345,7 @@ def process_attacker_User(i, n, ratio, target_set, g, domain, splits, e, h_ao):
     # Calculate the index in User_Seed to update
     index = int(n * (1 - ratio) + i)
     for v in range(domain):
-        hashed_value = xxhash.xxh3_64(str(v), seed=int(best_seed)).intdigest() % g
+        hashed_value = xxhash.xxh3_64(str(v).encode(), seed=int(best_seed)).intdigest() % g
         if hashed_value == best_hash_value:
             vector[v] = 1
    # print(f'attacker:{i}, target_map:{current_max_target_mapped}, diff:{best_gap}, h_ao:{h_ao}, splits:{splits}')
@@ -441,7 +441,7 @@ def process_attacker_server(i, n, ratio, target_set, g, domain, User_Seed, split
     target_hashes = {}
     splits_list = random.sample(list(target_set), splits)
     for t in splits_list:
-        hashed_value = xxhash.xxh3_64(str(t), seed=int(user_seed)).intdigest() % g
+        hashed_value = xxhash.xxh3_64(str(t).encode(), seed=int(user_seed)).intdigest() % g
         if hashed_value in target_hashes:
             target_hashes[hashed_value] += 1
         else:
@@ -454,7 +454,7 @@ def process_attacker_server(i, n, ratio, target_set, g, domain, User_Seed, split
     # Construct the attack vector
     attack_vector = np.zeros(domain)
     for v in range(domain):
-        hashed_value = xxhash.xxh3_64(str(v), seed=int(user_seed)).intdigest() % g
+        hashed_value = xxhash.xxh3_64(str(v).encode(), seed=int(user_seed)).intdigest() % g
         if hashed_value == best_hashed_value:
             attack_vector[v] = 1
 
@@ -658,7 +658,7 @@ def HST_Users(X, ratio, domain, epsilon, n, target_set, h_ao, splits):
     Y_normal = np.zeros(len(X))
     for i, v in enumerate(X):
         # Generate hash value
-        x = (xxhash.xxh3_64(str(v), seed=i).intdigest() % g)
+        x = (xxhash.xxh3_64(str(v).encode(), seed=i).intdigest() % g)
         y = x
         p_sample = np.random.random_sample()
 
@@ -678,7 +678,7 @@ def HST_Users(X, ratio, domain, epsilon, n, target_set, h_ao, splits):
     for i in range(n):
         user_seed = i  # Use the same seed as in perturbation
         for v in range(domain):
-            hashed_value = (xxhash.xxh3_64(str(v), seed=user_seed).intdigest() % g)
+            hashed_value = (xxhash.xxh3_64(str(v).encode(), seed=user_seed).intdigest() % g)
             if Y_normal[i] == hashed_value:
                 Results_support_normal[i, v] += 1
                 Estimations_normal_raw[v] += 1

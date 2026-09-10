@@ -9,6 +9,7 @@ A deep learning-based attacker detection system for Local Differential Privacy (
 | `mlp` | Multi-layer perceptron with BatchNorm and Dropout |
 | `gan` | GAN-style discriminator with LayerNorm |
 | `attention` | Transformer-style with per-feature embeddings and multi-head attention |
+| `ft_transformer` | Feature Tokenizer + pre-norm Transformer (Gorishniy et al. 2021) with ReGLU FFN |
 | `gat` | 3-layer Graph Attention Network with multi-head attention and composite loss |
 | `graphsage` | 3-layer GraphSAGE with mean aggregation |
 
@@ -48,11 +49,17 @@ python generate_dataset.py -o output/custom \
 
 | File | Description |
 |------|-------------|
-| `features.npy` | `(N, 18)` float32 — z-score normalized feature matrix |
+| `features.npy` | `(N, 16)` float32 — z-score normalized feature matrix |
 | `labels.npy` | `(N,)` float32 — binary labels (0 = benign, 1 = attacker) |
-| `config.npy` | `(N, 6)` object — per-row config: `[target_set_size, attacker_ratio, protocol, splits, epsilon, dataset_type]` |
+| `config.npy` | `(N, 9)` object — per-row config: `[target_set_size, attacker_ratio, protocol, splits, epsilon, dataset_type, n, experiment_id, row_in_experiment]` |
 | `norm_stats.json` | Feature means, stds, and names used for normalization |
-| `metadata.npz` | Per-graph metadata (π̂, π_true, p, q, support tensors) |
+| `metadata.npz` | Per-experiment metadata (π̂, π_true, p, q, support tensors), keyed by `experiment_id` |
+
+`n`, `experiment_id`, and `row_in_experiment` exist purely for post-training analysis and for indexing
+back into `metadata.npz` — never fed to the model (`main.py` builds `X_train`/`X_val`/`X_test` from
+`features.npy` only). `experiment_id` matches the integer used in `metadata.npz`'s `graph_{id:06d}_*` keys
+(that on-disk naming is an unrelated storage detail); `row_in_experiment` is that row's position (0..n-1)
+within its own experiment, letting you recover its raw support vector from `metadata.npz`.
 
 ### Dataset Generation CLI Arguments
 
@@ -71,7 +78,78 @@ python generate_dataset.py -o output/custom \
 | `--workers` | Outer ProcessPoolExecutor workers (OUE/HST) | 4 |
 | `--inner-processors` | Inner parallel processes per task | 4 |
 | `--save-every` | Flush to disk every N completed tasks | 50 |
-| `--robust-iterations` | Iterative robust re-estimation rounds | 2 |
+
+### Feature Set
+
+The 16 per-user features follow the DiffStats methodology, extended so every baseline they're scored
+against is derivable purely from public information — `(ε, protocol, domain)` alone — never from the
+true un-perturbed distribution or a simulated "ideal" reference, since a deployed server never observes
+either of those (that's what LDP protects). Two baselines are used, both purely analytic:
+
+- **k-value baseline**: `binom.pmf(k, domain, p_binomial)`, where `p_binomial` is derived exactly the
+  way `construct_omega` (`attacker_detector/data/generators/protocols.py`) derives it per protocol.
+- **Item-level baseline**: every item is equally likely to be reported with probability `p_binomial`
+  under complete ignorance of true item popularity — the only baseline computable without data that
+  isn't available at inference time. This carries no true item-popularity signal by itself, but is
+  still discriminative *per user*: all attackers in an experiment target the same small `target_set`,
+  so their individual deviations from this shared baseline are correlated across attacker rows, while a
+  benign user's deviation reflects only their own independently-drawn item.
+
+An empirically-estimated baseline (computed from the attacked reports themselves) doesn't have this
+property — at high attacker ratios it shifts toward the attack, and anomaly scores can invert (attackers
+end up looking *less* anomalous than honest users). The analytic baseline can't be contaminated that way.
+
+**HST caveat.** `HST_Server`/`HST_User`'s `one_list` (attacks.py) is a count of `+1`s in each user's
+*public random sign vector* — unrelated to their actual report for `HST_Server`, and deliberately padded
+by attackers to mimic the benign count for `HST_User`. The 9 features below derived from `one_list` /
+the k-value baseline carry near-zero signal for HST specifically (measured AUC ≈ 0.50–0.57, vs. ≈ 0.6–0.9
+for the same features under OUE) — a property of those two protocols' generators, not a bug in feature
+extraction. Only the item-level features (`overlap_anomalous_items_ratio`, `max_item_freq_ratio`,
+`mean_item_freq_ratio`, `support_entropy_scaled`, `user_theoretical_deviation`) retain any signal there.
+
+### Domain-Invariant Scaling
+
+Every feature is **dimensionless by construction**. Each scale-dependent quantity is divided by its
+analytically known scale, derived from `(d, p, q)` alone — nothing is fitted from data. A feature
+therefore means the same thing at any domain size, including one never seen during training.
+
+| Feature | Scaling | Rationale |
+|---------|---------|-----------|
+| `num_ones_scaled` | ÷ `expected_ones` = `p + (d−1)q` | centres on 1.0 for any `d` |
+| `one_deviation` | ÷ `σ_k` | unsigned magnitude counterpart to `num_ones_scaled`; see below |
+| `k_discrepancy_scaled`, `k_observed_frequency_scaled`, `k_theoretical_frequency_scaled` | × `σ_k` | see below |
+| `max_item_freq_ratio`, `mean_item_freq_ratio` | none needed | `item_frequency_ratio` is now `item_counts / (n · p_binomial)` — a ratio of two counts against an analytically-known scale, dimensionless at its source |
+| `user_theoretical_deviation` | none needed | mean absolute deviation of `reported` from `p_binomial` over `domain` items — already bounded in [0, 1] |
+| `support_entropy_scaled` | ÷ `log(d)` | a user reporting `k` items uniformly has entropy `log(k) ≤ log(d)`; bounds it to [0, 1] |
+| `wasserstein_distance_scaled` | ÷ `σ_k` | see below |
+| `freq_ratio`, `is_anomalous_k`, `overlap_anomalous_items_ratio`, `max_support_value`, `js_divergence_k` | none | already ratios, bounded, or indicator |
+
+where `σ_k = sqrt(d · p_binomial · (1 − p_binomial))` is the standard deviation of the k-histogram.
+
+**Why `σ_k` and not `d`.** The k-histogram is `Binomial(d, p_binomial)`, so its mass spreads over a
+width of `σ_k ≈ √d` bins, not `d` bins. Per-bin probability shrinks as `1/√d`, and the typical
+earth-mover distance from a point mass to that histogram is `O(σ_k)`, not `O(d)`. Dividing by `d`
+overcorrects — measured across d = 296/1024/1496, `wasserstein ÷ d` left a 0.88× spread while
+`÷ σ_k` leaves 0.03×.
+
+`is_anomalous_k` flags a fixed *fraction* of distinct k-values (`TOP_DISCREPANT_FRACTION`, 10%)
+rather than a fixed count. A fixed count would flag a shrinking share as `d` grows, since the number
+of distinct k scales with `σ_k`.
+
+**No simulated "ideal" reference is generated any more.** Earlier versions of this extractor sampled a
+synthetic un-attacked population (`build_normal_lists_from_mechanism_stochastic`) purely to estimate
+`item_probabilities` empirically. That sampling assigns each user's reported items *uniformly at random*
+among the domain — so, in expectation, it was always estimating the same `p_binomial` this version
+computes in closed form, just noisily and at the cost of an `O(n·domain)` simulation per experiment.
+Computing it directly is strictly better: exact, free, and (unlike a simulated reference) something a
+real server could reproduce from public parameters alone.
+
+`std_item_freq_ratio` and `overlap_anomalous_items_count` are deliberately excluded — the former still
+drifts across domains even after scaling, the latter's ratio form carries the same signal, scale-free.
+`theoretical_probability_k` is also dropped — identical to `k_theoretical_frequency` by construction.
+
+Features that depend only on the user's `k` are computed once per distinct `k` and indexed per user,
+rather than recomputed for every user in the experiment.
 
 ## PCA Graph Dataset Generation
 
@@ -165,22 +243,29 @@ python main.py -d output/my_dataset -m mlp --k-folds 5 --cv-only
 # Standard training (no CV, no early stopping)
 python main.py -d output/my_dataset -m mlp --epochs 10 --k-folds 0 --val-size 0
 
-# Cross-dataset: train on zipf, test on emoji, with CV
+# Cross-dataset: train on zipf, test on emoji, with CV (HP grid search runs by default)
 python main.py -d output/my_dataset -m mlp \
     --training-method cross --train-dataset zipf --test-dataset emoji --k-folds 5
+
+# Cross-dataset with combined training types: train on zipf+emoji, test on fire
+python main.py -d output/my_dataset -m mlp \
+    --training-method cross --train-dataset zipf emoji --test-dataset fire --k-folds 5
 
 # Three-way: train on zipf, test on emoji, evaluate on fire
 python main.py -d output/my_dataset -m mlp \
     --training-method three-way \
     --train-dataset zipf --test-dataset emoji --eval-dataset fire
+
+# Skip HP grid search, use --lr/--dropout directly for CV + final training
+python main.py -d output/my_dataset -m mlp --k-folds 5 --no-hp-search
 ```
 
 ### Training Pipeline
 
 1. **Load NPY dataset** from directory (features are pre-normalized)
 2. **Split data** into train / val / test (stratified)
-3. **K-fold CV** on train+val (optional, `--k-folds`)
-4. **Final training** with early stopping on val F1 (`--patience`)
+3. **K-fold CV** on train+val, with HP grid search by default (`--k-folds`, `--no-hp-search`)
+4. **Final training** with early stopping on val F1 (`--patience`), using the best HP config found by CV
 5. **Test evaluation** + sensitivity analysis with config metadata
 
 ### CLI Arguments
@@ -191,38 +276,83 @@ python main.py -d output/my_dataset -m mlp \
 | `--model`, `-m` | Model type: `mlp`, `gan`, `attention` | *required* |
 | `--epochs`, `-e` | Max training epochs | 5 |
 | `--batch-size`, `-b` | Batch size | 256 |
-| `--lr` | Learning rate | 0.001 |
-| `--dropout` | Dropout rate | 0.2 |
+| `--lr` | Learning rate (fallback when HP search is skipped, or for values not in the grid) | 0.001 |
+| `--dropout` | Dropout rate (fallback when HP search is skipped, or for values not in the grid) | 0.2 |
+| `--hidden-sizes` | MLP hidden layer widths, comma-separated, e.g. `--hidden-sizes 64,32,16` | pyramid rule (see below) |
 | `--test-size` | Test split ratio (only for `none` mode) | 0.2 |
 | `--val-size` | Validation fraction (carved from train) | 0.15 |
-| `--k-folds` | K-fold CV folds (0 to skip) | 5 |
+| `--k-folds` | K-fold CV folds (0 to skip CV entirely) | 5 |
 | `--patience` | Early stopping patience (epochs) | 10 |
 | `--cv-only` | Run only k-fold CV, skip final training | False |
+| `--no-hp-search` | Skip HP grid search; use `--lr`/`--dropout`/`--pos-weight` directly for CV and final training | False |
+| `--hp-lr` | Learning rate values to grid-search, e.g. `--hp-lr 0.0005 0.001 0.003` | `config.DEFAULT_TABULAR_HP_GRID['lr']` |
+| `--hp-dropout` | Dropout values to grid-search, e.g. `--hp-dropout 0.1 0.2 0.3` | `config.DEFAULT_TABULAR_HP_GRID['dropout']` |
+| `--pos-weight` | Positive class weight for BCE loss. `'auto'` computes `neg_count / pos_count` from training data; or provide a float | `auto` |
+| `--hp-pos-weight` | pos_weight values to grid-search, e.g. `--hp-pos-weight auto 1.0 5.77` (each is `'auto'` or a float). Not searched unless given | None (not searched) |
+| `--hp-hidden-sizes` | MLP shapes to grid-search, e.g. `--hp-hidden-sizes 256,128,64 64,32,16`, or `default` for `config.DEFAULT_HIDDEN_SIZE_GRID`. `mlp` only | None (not searched) |
 | `--seed` | Random seed | 42 |
 | `--output-dir`, `-o` | Save model/plots/results here | None |
 | `--no-plot` | Skip sensitivity plots | False |
+
+### Hyperparameter Grid Search
+
+When `--k-folds > 0` (the default), `main.py` runs a **grid search over `--hp-lr` × `--hp-dropout`** via k-fold CV before final training — mirroring the HP search already used in `main_gnn.py`. Each combination is evaluated with `n_folds`-fold CV; the config with the highest mean validation F1 is used for the final training run. Pass `--no-hp-search` to skip this and train directly with `--lr`/`--dropout`/`--pos-weight`.
+
+`--pos-weight` is **not searched by default** — pass `--hp-pos-weight` explicitly (e.g. `--hp-pos-weight auto 1.0 3.0`) to add it as a third grid axis; it multiplies the total number of configs by however many values you give. `'auto'` recomputes `neg_count / pos_count` fresh per fold (so it can vary slightly fold-to-fold), while a fixed float pins the same weight everywhere. Note: `Trainer`'s previous default silently used a fixed `pos_weight = 1.0` regardless of actual class imbalance; the default is now `'auto'`, which for a typical ~85/15 benign/attacker split resolves to roughly 5.7 instead of 1.0 — expect final-training behavior to shift accordingly unless you pass `--pos-weight 1.0` to match the old behavior.
+
+### MLP Layer Sizing
+
+`RobustAttackerDetector` takes a `hidden_sizes` list instead of a fixed `256 → 128 → 64` stack. Each
+entry becomes a `Linear → BatchNorm → LeakyReLU(0.1) → Dropout` block, with the last block using half
+the dropout rate. Weights use He/Kaiming init matched to the LeakyReLU slope.
+
+The default applies the **geometric pyramid rule** (Masters, 1993): seed the first hidden layer near
+the input width, then halve on each subsequent layer. For a 17-feature input this gives
+`[64, 32, 16]` (~4K parameters) versus the previous `[256, 128, 64]` (~47K).
+
+```python
+pyramid_hidden_sizes(input_dim=17)  # -> [64, 32, 16]
+```
+
+Sizing heuristics do not transfer reliably between problems, so treat the default as a starting point
+and let CV decide — pass `--hp-hidden-sizes default` to search `config.DEFAULT_HIDDEN_SIZE_GRID`:
+
+| `hidden_sizes` | Params | Rationale |
+|----------------|--------|-----------|
+| `[256, 128, 64]` | ~47K | previous hardcoded default |
+| `[128, 64, 32]` | ~13K | moderate taper |
+| `[64, 32, 16]` | ~4K | geometric pyramid rule |
+| `[64, 64, 32, 16]` | ~8K | deeper, gentler taper |
+
+One caveat worth knowing when interpreting results: MLPs are
+[uniquely sensitive to uninformative features](https://arxiv.org/pdf/2207.08815) because their
+rotational invariance prevents them from ignoring a feature the way a decision tree can. If a shape
+search produces little separation between configs, suspect the feature set before adding capacity.
+
+Grid search is **not yet applied to `--training-method cross`/`three-way`'s val/test splits** beyond CV itself — the selected config is still used for the actual cross-dataset final training and evaluation, so `--train-dataset zipf emoji --test-dataset fire --k-folds 5` grid-searches over the combined zipf+emoji train+val portion, then trains/evaluates the winning config on the real train→test split.
 
 ### Generalizability Training
 
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--training-method` | `none`, `cross`, or `three-way` | `none` |
-| `--train-dataset` | Dataset type for training: `zipf`, `emoji`, `fire` | None |
+| `--train-dataset` | One or more dataset types for training, e.g. `zipf` or `zipf emoji` | None |
 | `--test-dataset` | Dataset type for testing | None |
 | `--eval-dataset` | Dataset type for evaluation (three-way only) | None |
 
 **Training methods:**
 
 - **`none`** — Conventional training. All dataset types are mixed together and split randomly into train/val/test.
-- **`cross`** — Cross-dataset generalizability. Train on one dataset type, test on another. Val is carved from train.
-- **`three-way`** — Full generalizability evaluation. Train on one type, test on a second, evaluate on a third.
+- **`cross`** — Cross-dataset generalizability. Train on one *or more* dataset types (combined), test on another. Val is carved from train.
+- **`three-way`** — Full generalizability evaluation. Train on one type (or combination), test on a second, evaluate on a third.
 
 ### Output Files
 
 | File | Contents |
 |------|----------|
 | `model.pt` | Model checkpoint |
-| `cv_results.csv` | Per-fold metrics from k-fold CV |
+| `hp_search_results.csv` | Per-config mean/std CV metrics from HP grid search (omitted with `--no-hp-search`) |
+| `cv_results.csv` | Per-fold metrics from k-fold CV (best config, if HP search ran) |
 | `training_history.csv` | Per-epoch train loss + val F1/accuracy |
 | `sensitivity_test_results.csv` | Sensitivity by ε, ratio, target size, dataset type |
 | `sensitivity_eval_results.csv` | Sensitivity for eval set (three-way only) |

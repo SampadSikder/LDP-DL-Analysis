@@ -59,12 +59,15 @@ def prepare_data(
     return X_train, X_test, y_train, y_test, scaler, test_idx
 
 
-_CONF_TARGET_SET_SIZE = 0
-_CONF_ATTACKER_RATIO  = 1
-_CONF_PROTOCOL        = 2
-_CONF_SPLITS          = 3
-_CONF_EPSILON         = 4
-_CONF_DATASET_TYPE    = 5
+_CONF_TARGET_SET_SIZE    = 0
+_CONF_ATTACKER_RATIO     = 1
+_CONF_PROTOCOL           = 2
+_CONF_SPLITS             = 3
+_CONF_EPSILON            = 4
+_CONF_DATASET_TYPE       = 5
+_CONF_N                  = 6
+_CONF_EXPERIMENT_ID      = 7
+_CONF_ROW_IN_EXPERIMENT  = 8
 
 
 class NpyDataset:
@@ -78,7 +81,7 @@ class NpyDataset:
     ):
         self.features = features          # (N, F) float32, already normalized
         self.labels = labels              # (N,) float32
-        self.config = config              # (N, 6) object
+        self.config = config              # (N, 9) object
         self.feature_names = feature_names
         self.norm_stats = norm_stats
 
@@ -101,6 +104,26 @@ class NpyDataset:
     def target_set_sizes(self) -> np.ndarray:
         return self.config[:, _CONF_TARGET_SET_SIZE].astype(np.int32)
 
+    @property
+    def splits(self) -> np.ndarray:
+        return self.config[:, _CONF_SPLITS].astype(np.int32)
+
+    @property
+    def protocols(self) -> np.ndarray:
+        return self.config[:, _CONF_PROTOCOL]
+
+    @property
+    def n_users(self) -> np.ndarray:
+        return self.config[:, _CONF_N].astype(np.int64)
+
+    @property
+    def experiment_ids(self) -> np.ndarray:
+        return self.config[:, _CONF_EXPERIMENT_ID].astype(np.int64)
+
+    @property
+    def rows_in_experiment(self) -> np.ndarray:
+        return self.config[:, _CONF_ROW_IN_EXPERIMENT].astype(np.int64)
+
 
 def load_npy_dataset(data_dir: str) -> NpyDataset:
     features_path = os.path.join(data_dir, 'features.npy')
@@ -118,14 +141,14 @@ def load_npy_dataset(data_dir: str) -> NpyDataset:
     n_users  = len(labels)
 
     if os.path.exists(config_path):
-        config = np.load(config_path, allow_pickle=True)      # object array (N, 6)
+        config = np.load(config_path, allow_pickle=True)      # object array (N, 9)
     else:
         print(
             "  [WARN] config.npy not found in dataset directory. "
             "Sensitivity analysis by epsilon/ratio/dataset_type will be unavailable. "
             "Re-run generate_dataset.py to produce a complete dataset with config.npy."
         )
-        config = np.empty((n_users, 6), dtype=object)
+        config = np.empty((n_users, 9), dtype=object)
 
     norm_stats = None
     if os.path.exists(norm_path):
@@ -202,21 +225,30 @@ def prepare_npy_data(
 
 def prepare_npy_data_by_dataset_type(
     ds: NpyDataset,
-    train_type: str,
+    train_type,
     test_type: str,
     eval_type: Optional[str] = None,
     val_size: float = 0.0,
     random_state: int = 42,
 ) -> Dict:
     """Split by dataset_type column for cross/three-way generalization tests.
+
+    Args:
+        train_type: A single dataset_type string, or a list of dataset_type
+            strings to combine into one training set (e.g. ['zipf', 'emoji']).
+        test_type: Single dataset_type used for testing.
+        eval_type: Optional single dataset_type used for three-way eval.
     """
     dt = ds.dataset_types
 
-    train_mask = dt == train_type
+    train_types = [train_type] if isinstance(train_type, str) else list(train_type)
+    train_label = '+'.join(train_types)
+
+    train_mask = np.isin(dt, train_types)
     test_mask  = dt == test_type
 
     if not train_mask.any():
-        raise ValueError(f"No rows for train dataset_type='{train_type}'")
+        raise ValueError(f"No rows for train dataset_type(s)={train_types}")
     if not test_mask.any():
         raise ValueError(f"No rows for test dataset_type='{test_type}'")
 
@@ -260,14 +292,14 @@ def prepare_npy_data_by_dataset_type(
         result['X_trainval']       = X_tv
         result['y_trainval']       = y_tv
         result['trainval_indices'] = trainval_idx
-        print(f"Train ({train_type}): {len(X_train):,}  Val: {len(X_val):,}  Test ({test_type}): {len(X_test):,}")
+        print(f"Train ({train_label}): {len(X_train):,}  Val: {len(X_val):,}  Test ({test_type}): {len(X_test):,}")
     else:
         X_train = ds.features[trainval_idx]
         y_train = ds.labels[trainval_idx]
         result['X_train']       = X_train
         result['y_train']       = y_train
         result['train_indices'] = trainval_idx
-        print(f"Train ({train_type}): {len(X_train):,}  Test ({test_type}): {len(X_test):,}")
+        print(f"Train ({train_label}): {len(X_train):,}  Test ({test_type}): {len(X_test):,}")
 
     if eval_type is not None:
         eval_mask = dt == eval_type

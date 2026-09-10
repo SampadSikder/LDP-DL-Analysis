@@ -5,20 +5,21 @@ from .gan import AttackerDiscriminator
 from .attention import AttentionAttackerDetector, MultiHeadAttention
 from .gat import GATAttackerDetector
 from .graphsage import GraphSAGEAttackerDetector
+from .ft_transformer import FTTransformer, FT_TRANSFORMER_HP_KEYS
 
 
 def get_model(model_type: str, input_dim: int, **kwargs):
     """
     Factory function to create models by type.
-    
+
     Args:
-        model_type: Type of model ('mlp', 'gan', 'attention', 'gat', 'graphsage')
+        model_type: Type of model ('mlp', 'gan', 'attention', 'gat', 'graphsage', 'ft_transformer')
         input_dim: Number of input features
         **kwargs: Additional model-specific arguments (e.g., dropout_rate, hidden_dim, num_heads)
-    
+
     Returns:
         Instantiated PyTorch model
-    
+
     Raises:
         ValueError: If model_type is not supported
     """
@@ -28,14 +29,15 @@ def get_model(model_type: str, input_dim: int, **kwargs):
         'attention': AttentionAttackerDetector,
         'gat': GATAttackerDetector,
         'graphsage': GraphSAGEAttackerDetector,
+        'ft_transformer': FTTransformer,
     }
-    
+
     if model_type not in models:
         raise ValueError(
             f"Unknown model type: '{model_type}'. "
             f"Available models: {list(models.keys())}"
         )
-    
+
     return models[model_type](input_dim, **kwargs)
 
 
@@ -43,5 +45,6 @@ __all__ = [
     'RobustAttackerDetector', 'AttackerDiscriminator',
     'AttentionAttackerDetector', 'MultiHeadAttention',
     'GATAttackerDetector', 'GraphSAGEAttackerDetector',
+    'FTTransformer', 'FT_TRANSFORMER_HP_KEYS',
     'get_model',
 ]

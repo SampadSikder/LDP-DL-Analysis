@@ -114,3 +114,25 @@ DEFAULT_GNN_HP_GRID = {
     'num_heads':       [2, 4, 8],
     'init_method':     ['orthogonal', 'xavier_uniform', 'kaiming']
 }
+
+DEFAULT_TABULAR_HP_GRID = {
+    'lr':      [0.0005, 0.001, 0.003],
+    'dropout': [0.1, 0.2, 0.3],
+}
+
+
+DEFAULT_HIDDEN_SIZE_GRID = [
+    [256, 128, 64],
+    [128, 64, 32],
+    [64, 32, 16],
+    [64, 64, 32, 16],
+]
+
+DEFAULT_FT_TRANSFORMER_GRID = {
+    'd_token':           [32, 64, 128],
+    'n_heads':           [4, 8],
+    'n_layers':          [1, 2, 3],
+    'ffn_d_multiplier':  [1.33],
+    'attention_dropout': [0.1, 0.2],
+    'residual_dropout':  [0.0, 0.1],
+}

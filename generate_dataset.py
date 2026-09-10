@@ -22,7 +22,8 @@ from config import (
 )
 from attacker_detector.data.generators import (
     generate_perturbed_data,
-    extract_user_level_features,
+    extract_user_level_features_diffstats_style,
+    compute_pi_hat,
     FEATURE_NAMES,
 )
 
@@ -74,7 +75,6 @@ def build_tasks(args) -> list:
                                     'seed': seed,
                                     'inner_processors': 1 if protocol.startswith('OLH') else args.inner_processors,
                                     'olh_setting': olh_setting,
-                                    'robust_iterations': args.robust_iterations,
                                     'exp_i': exp_i,
                                     'desc': (
                                         f"ε={epsilon}, {dataset_type}, {protocol}, "
@@ -110,19 +110,24 @@ def run_one_task(task: dict) -> dict:
             olh_setting=task['olh_setting'],
         )
 
-        features, feat_meta = extract_user_level_features(
+        features = extract_user_level_features_diffstats_style(
             support_list=support_list,
             one_list=one_list,
             epsilon=task['epsilon'],
             protocol=task['protocol_label'],
             domain=task['domain'],
             n=task['n'],
-            robust_iterations=task['robust_iterations'],
         )
 
+        pi_hat, p_param, q_param = compute_pi_hat(
+            support_list, task['protocol_label'], task['epsilon'], task['domain']
+        )
+
+        # experiment_id is appended by _handle_result (main process), which is
+        # the only place the final sequential index across all tasks is known.
         config_summary = [
             task['target_set_size'], task['ratio'], task['protocol_label'],
-            task['splits'], task['epsilon'], task['dataset_type']
+            task['splits'], task['epsilon'], task['dataset_type'], task['n'],
         ]
 
         p_label = task['protocol_label']
@@ -132,10 +137,10 @@ def run_one_task(task: dict) -> dict:
             support_tensor_cast = support_list.astype(np.uint8)
 
         graph_meta = {
-            'pi_hat': feat_meta['pi_hat'].astype(np.float32),
+            'pi_hat': pi_hat.astype(np.float32),
             'pi_true': real_dist.astype(np.float32),
-            'p': feat_meta['p'],
-            'q': feat_meta['q'],
+            'p': p_param,
+            'q': q_param,
             'epsilon': task['epsilon'],
             'protocol': p_label,
             'support_tensor': support_tensor_cast,
@@ -195,10 +200,14 @@ def flush_to_disk(
     with open(labels_bin_path, 'ab') as l_bin:
         l_bin.write(batch_labels.tobytes())
 
-    # Expand per-graph config to per-user rows and flush
+    # Expand per-experiment config to per-user rows and flush. row_in_experiment
+    # (0..n_users-1) is the one column that varies within an experiment, so it's
+    # appended per-row rather than tiled like the rest of cfg_sum.
     tiled = []
     for cfg_sum, n_users in all_configs:
-        tiled.append(np.tile(cfg_sum, (n_users, 1)))
+        tiled_rows = np.tile(cfg_sum, (n_users, 1))
+        row_in_experiment = np.arange(n_users).reshape(-1, 1)
+        tiled.append(np.hstack([tiled_rows, row_in_experiment]))
     batch_config = np.vstack(tiled)  # object array — use pickle/npy format
     buf = batch_config.tobytes()  # won't work for object — use np.save
     import io
@@ -332,13 +341,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        '--robust-iterations',
-        type=int,
-        default=2,
-        help='Number of iterative robust re-estimation rounds for positional features'
-    )
-
-    parser.add_argument(
         '--save-every',
         type=int,
         default=20,
@@ -381,7 +383,6 @@ def main():
     print(f"  Sequential tasks (OLH):   {len(sequential_tasks)}")
     print(f"Outer workers: {args.workers}")
     print(f"Inner processors per task: {args.inner_processors}")
-    print(f"Robust iterations: {args.robust_iterations}")
     print(f"Feature count: {len(FEATURE_NAMES)}")
     print(f"Features: {FEATURE_NAMES}")
     print("=" * 80)
@@ -416,14 +417,20 @@ def main():
         nonlocal total_users, total_attackers, num_success, num_failed, graph_index
 
         if result['ok']:
+            # experiment_id matches the graph_{idx:06d}_* keys metadata.npz gets
+            # written under below — this is the only place the final sequential
+            # index across all (possibly out-of-order-completing) tasks is known.
+            experiment_id = graph_index
+            config_summary = list(result['config_summary']) + [experiment_id]
+
             all_features.append(result['features'])
             all_labels.append(result['labels'])
-            all_configs.append((result['config_summary'], result['num_users']))
+            all_configs.append((config_summary, result['num_users']))
             total_users += result['num_users']
             total_attackers += result['num_attackers']
             num_success += 1
 
-            # Save per-graph metadata
+            # Save per-experiment metadata
             gm = result['graph_meta']
             all_metadata.append({
                 'pi_hat': gm['pi_hat'],
@@ -511,7 +518,9 @@ def main():
     if os.path.exists(features_bin_path):
         print("\nComputing global z-score normalization statistics...")
         norm_path = os.path.join(output_dir, 'norm_stats.json')
-        features_all = np.fromfile(features_bin_path, dtype=np.float32).reshape(total_users, 18).astype(np.float64)
+        features_all = np.fromfile(features_bin_path, dtype=np.float32).reshape(
+            total_users, len(FEATURE_NAMES)
+        ).astype(np.float64)
         feat_mean = np.mean(features_all, axis=0)
         feat_std = np.std(features_all, axis=0)
         near_zero = feat_std < 1e-8
