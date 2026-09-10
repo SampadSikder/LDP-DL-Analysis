@@ -18,6 +18,7 @@ from config import (
     DEFAULT_GNN_HIDDEN_DIM,
     DEFAULT_GNN_NUM_HEADS,
     DEFAULT_GNN_LAMBDA_AGG,
+    DEFAULT_GNN_LAMBDA_UTILITY,
     DEFAULT_GNN_PATIENCE,
     DEFAULT_GNN_K_FOLDS,
     DEFAULT_GNN_BATCH_SIZE,
@@ -101,6 +102,27 @@ def parse_args():
         help='Aggregation loss weight (lambda)',
     )
     parser.add_argument(
+        '--lambda-utility',
+        type=float,
+        default=DEFAULT_GNN_LAMBDA_UTILITY,
+        help='Utility loss weight (lambda_utility)',
+    )
+    parser.add_argument(
+        '--utility-metric',
+        type=str,
+        default='js',
+        choices=['js', 'wasserstein'],
+        help='Metric for utility loss calculation',
+    )
+    parser.add_argument(
+        '--pos-weight',
+        type=str,
+        default='auto',
+        help='Positive class weight for BCE loss. '
+             "'auto' computes neg/pos ratio from data, "
+             "or provide a float",
+    )
+    parser.add_argument(
         '--batch-size', '-b',
         type=int,
         default=DEFAULT_GNN_BATCH_SIZE,
@@ -111,6 +133,12 @@ def parse_args():
         type=int,
         default=DEFAULT_GNN_PATIENCE,
         help='Early stopping patience (epochs)',
+    )
+    parser.add_argument(
+        '--threshold',
+        type=float,
+        default=0.5,
+        help='Classification threshold for predictions (lower = more attacker predictions)',
     )
 
     # Initialization
@@ -126,7 +154,7 @@ def parse_args():
     parser.add_argument(
         '--k-folds',
         type=int,
-        default=0,
+        default=5,
         help='Number of folds for k-fold CV (0 to skip)',
     )
     parser.add_argument(
@@ -134,7 +162,14 @@ def parse_args():
         type=float,
         nargs='+',
         default=None,
-        help='Lambda (agg loss weight) values to search (e.g. --hp-lambda-agg 0.05 0.1 0.2)',
+        help='Lambda agg values to search',
+    )
+    parser.add_argument(
+        '--hp-lambda-utility',
+        type=float,
+        nargs='+',
+        default=None,
+        help='Lambda utility values to search',
     )
     parser.add_argument(
         '--hp-num-heads',
@@ -175,6 +210,21 @@ def parse_args():
         type=float,
         default=0.15,
         help='Fraction of graphs for validation set',
+    )
+
+    # Cross-protocol / cross-dataset evaluation
+    parser.add_argument(
+        '--split-by',
+        type=str,
+        default='none',
+        choices=['none', 'protocol', 'dataset_type', 'both'],
+        help='After test evaluation, print per-group metrics sliced by this metadata key',
+    )
+    parser.add_argument(
+        '--cross-eval-path',
+        type=str,
+        default=None,
+        help='Path to a second .pt dataset for out-of-distribution evaluation',
     )
 
     # Output
@@ -223,6 +273,55 @@ def run_gnn_sensitivity_analysis(per_graph_results: list) -> pd.DataFrame:
             })
 
     return pd.DataFrame(rows)
+
+
+def _print_grouped_metrics(
+    per_graph_results: list,
+    split_by: str,
+    output_dir: str = None,
+    label: str = 'Test',
+) -> None:
+    """Print per-group metrics sliced by protocol, dataset_type, or both."""
+    df = pd.DataFrame(per_graph_results)
+    metric_cols = ['Accuracy', 'Precision', 'Recall', 'F1_Score']
+
+    if split_by == 'both':
+        group_keys = ['protocol', 'dataset_type']
+    else:
+        group_keys = [split_by]
+
+    # Filter out keys not present in data
+    group_keys = [k for k in group_keys if k in df.columns]
+    if not group_keys:
+        print(f"  No metadata columns found for split-by={split_by}")
+        return
+
+    print(f"\n{'─'*70}")
+    print(f"Grouped {label} Metrics (split-by: {split_by})")
+    print(f"{'─'*70}")
+
+    grouped = df.groupby(group_keys)
+    rows = []
+    for group_val, group_df in sorted(grouped):
+        group_label = group_val if isinstance(group_val, str) else ' / '.join(str(v) for v in group_val)
+        row = {k: group_label if i == 0 else '' for i, k in enumerate(group_keys)}
+        row.update({k: group_label for k in group_keys} if len(group_keys) == 1 else dict(zip(group_keys, group_val)))
+        row['Count'] = len(group_df)
+        for m in metric_cols:
+            row[m] = group_df[m].mean()
+        rows.append(row)
+        print(f"  {group_label}: "
+              f"F1={row['F1_Score']:.4f}  "
+              f"Prec={row['Precision']:.4f}  "
+              f"Rec={row['Recall']:.4f}  "
+              f"Acc={row['Accuracy']:.4f}  "
+              f"(n={row['Count']})")
+
+    if output_dir:
+        summary_df = pd.DataFrame(rows)
+        path = os.path.join(output_dir, f'grouped_metrics_{label.lower().replace(" ", "_")}.csv')
+        summary_df.to_csv(path, index=False)
+        print(f"  Saved to: {path}")
 
 
 def _save_gnn_sensitivity_plots(sensitivity_df: pd.DataFrame, output_dir: str = None) -> None:
@@ -314,14 +413,16 @@ def main():
     # ── Hyperparameter selection via k-fold CV ──────────────────────────
     # Resolved training params — may be overridden by HP search below
     best_lambda_agg = args.lambda_agg
+    best_lambda_utility = args.lambda_utility
     best_init_method = args.init_method
     best_model_kwargs = dict(model_kwargs)
+    pos_weight_arg = None if args.pos_weight == 'auto' else float(args.pos_weight)
 
     if args.k_folds > 0:
         model_class = type(get_model(args.model, **model_kwargs))
 
         if args.no_hp_search:
-            # Plain k-fold CV with fixed CLI params (no grid search)
+            # Plain k-fold CV with fixed CLI params
             cv_results = run_k_fold_cv(
                 model_class=model_class,
                 model_kwargs=model_kwargs,
@@ -331,11 +432,15 @@ def main():
                 batch_size=args.batch_size,
                 learning_rate=args.lr,
                 lambda_agg=args.lambda_agg,
+                lambda_utility=args.lambda_utility,
+                utility_metric=args.utility_metric,
                 patience=args.patience,
                 init_method=args.init_method,
                 model_type=args.model,
                 device=device,
                 seed=args.seed,
+                pos_weight=pos_weight_arg,
+                threshold=args.threshold,
             )
 
             if args.output_dir:
@@ -352,6 +457,11 @@ def main():
                 hp_grid['lambda_agg'] = args.hp_lambda_agg
             elif 'lambda_agg' in DEFAULT_GNN_HP_GRID:
                 hp_grid['lambda_agg'] = DEFAULT_GNN_HP_GRID['lambda_agg']
+
+            if args.hp_lambda_utility is not None:
+                hp_grid['lambda_utility'] = args.hp_lambda_utility
+            elif 'lambda_utility' in DEFAULT_GNN_HP_GRID:
+                hp_grid['lambda_utility'] = DEFAULT_GNN_HP_GRID['lambda_utility']
 
             if args.model == 'gat':
                 if args.hp_num_heads is not None:
@@ -379,11 +489,16 @@ def main():
                 seed=args.seed,
                 base_learning_rate=args.lr,
                 base_lambda_agg=args.lambda_agg,
+                base_lambda_utility=args.lambda_utility,
+                utility_metric=args.utility_metric,
+                pos_weight=pos_weight_arg,
+                threshold=args.threshold,
             )
 
             best_config = search_results['best_config']
 
             best_lambda_agg = best_config.get('lambda_agg', args.lambda_agg)
+            best_lambda_utility = best_config.get('lambda_utility', args.lambda_utility)
             best_init_method = best_config.get('init_method', args.init_method)
             if 'num_heads' in best_config and args.model == 'gat':
                 best_model_kwargs['num_heads'] = best_config['num_heads']
@@ -406,15 +521,15 @@ def main():
         print("Done!")
         return
 
-    # ── Final Training (using best config) ─────────────────────────────
     print("\n" + "=" * 70)
-    print("Final Training (Train+Val → Test)")
+    print("Final Training ( Train+Val → Test)")
     print("=" * 70)
     if args.k_folds > 0:
         print(f"  Using best HP config from CV search:")
-        print(f"    Learning rate: {args.lr}")
-        print(f"    Lambda (agg):  {best_lambda_agg}")
-        print(f"    Model kwargs:  {best_model_kwargs}")
+        print(f"    Learning rate:  {args.lr}")
+        print(f"    Lambda (agg):   {best_lambda_agg}")
+        print(f"    Lambda (util):  {best_lambda_utility} ({args.utility_metric})")
+        print(f"    Model kwargs:   {best_model_kwargs}")
 
     splits = dataset.stratified_split(
         test_ratio=args.test_ratio,
@@ -445,8 +560,12 @@ def main():
         device=device,
         learning_rate=args.lr,
         lambda_agg=best_lambda_agg,
+        lambda_utility=best_lambda_utility,
+        utility_metric=args.utility_metric,
         patience=args.patience,
         model_type=args.model,
+        pos_weight=pos_weight_arg,
+        threshold=args.threshold,
     )
 
     history = trainer.fit(
@@ -467,7 +586,7 @@ def main():
 
 
     print("\n" + "=" * 70)
-    print("Test Evaluation")
+    print("Generalization: Test Evaluation")
     print("=" * 70)
 
     test_metrics = trainer.evaluate(test_loader, label="Test")
@@ -501,6 +620,61 @@ def main():
 
     print("\nPlotting sensitivity analysis...")
     _save_gnn_sensitivity_plots(sensitivity_df, output_dir=args.output_dir)
+
+    # ── Grouped evaluation (split-by protocol / dataset_type / both) ───
+    if args.split_by != 'none':
+        _print_grouped_metrics(
+            per_graph_results,
+            split_by=args.split_by,
+            output_dir=args.output_dir,
+            label='Test',
+        )
+
+    # ── Out-of-distribution evaluation on a second dataset ─────────────
+    if args.cross_eval_path:
+        print("\n" + "=" * 70)
+        print(f"OOD Evaluation: {args.cross_eval_path}")
+        print("=" * 70)
+
+        ood_dataset = GraphDatasetLoader(args.cross_eval_path)
+        ood_all_idx = list(range(len(ood_dataset)))
+
+        ood_loader = ood_dataset.get_dataloader(
+            ood_all_idx, batch_size=args.batch_size, shuffle=False, pin_memory=pin
+        )
+        ood_metrics = trainer.evaluate(ood_loader, label="OOD")
+
+        ood_per_graph_loader = ood_dataset.get_dataloader(
+            ood_all_idx, batch_size=1, shuffle=False, pin_memory=pin
+        )
+        ood_per_graph = trainer.evaluate_per_graph(ood_per_graph_loader)
+
+        print("\nRunning Sensitivity Analysis on OOD graphs...")
+        ood_sensitivity_df = run_gnn_sensitivity_analysis(ood_per_graph)
+        print("\nSensitivity Analysis Results (OOD):")
+        print(ood_sensitivity_df.to_string(index=False))
+
+        if args.split_by != 'none':
+            _print_grouped_metrics(
+                ood_per_graph,
+                split_by=args.split_by,
+                output_dir=args.output_dir,
+                label='OOD',
+            )
+
+        if args.output_dir:
+            ood_metrics_path = os.path.join(args.output_dir, 'ood_metrics.csv')
+            pd.DataFrame([ood_metrics]).to_csv(ood_metrics_path, index=False)
+            print(f"\nOOD metrics saved to: {ood_metrics_path}")
+
+            ood_per_graph_df = pd.DataFrame(ood_per_graph)
+            ood_per_graph_path = os.path.join(args.output_dir, 'ood_per_graph_results.csv')
+            ood_per_graph_df.to_csv(ood_per_graph_path, index=False)
+            print(f"OOD per-graph results saved to: {ood_per_graph_path}")
+
+            ood_sens_path = os.path.join(args.output_dir, 'ood_sensitivity_results.csv')
+            ood_sensitivity_df.to_csv(ood_sens_path, index=False)
+            print(f"OOD sensitivity results saved to: {ood_sens_path}")
 
     print("\nDone!")
 

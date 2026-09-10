@@ -1,23 +1,22 @@
 name: attacker-detector
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
-  - pytorch
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.1
-  #- cpuonly # without gpu
   - numpy
   - pandas
   - scikit-learn
+  - scipy
   - matplotlib
   - seaborn
   - tqdm
   - pip
   - pip:
+    - torch
+    - torchvision
+    - torchaudio
+    - --extra-index-url https://download.pytorch.org/whl/cu130  # match your CUDA driver
+    #- --extra-index-url https://download.pytorch.org/whl/cpu  # cpuonly # without gpu
     - xxhash
     - torch-geometric

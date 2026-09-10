@@ -54,7 +54,7 @@ DATASET_CONFIGS_FULL = {
     'fire':  {'domain': 296,  'n': 723090},
 }
 
-DATASET_FEATURE_NAMES = [
+DATASET_FEATURE_NAMES_V1 = [
     'num_ones', 'k_discrepancy', 'k_observed_frequency',
     'k_theoretical_frequency', 'freq_ratio', 'is_anomalous_k',
     'overlap_anomalous_items_count', 'overlap_anomalous_items_ratio',
@@ -65,6 +65,28 @@ DATASET_FEATURE_NAMES = [
     'wasserstein_distance_k', 'js_divergence_k',
 ]
 
+# V2 analytical-null features (used by generate_dataset.py v2)
+DATASET_FEATURE_NAMES = [
+    'num_ones',
+    'chisq',
+    'neg_log_p',
+    'deviation',
+    'deviation_percentile',
+    'deviation_zscore',
+    'mean_z_initial',
+    'max_abs_z_initial',
+    'positional_chisq_initial',
+    'overlap_count_initial',
+    'overlap_ratio_initial',
+    'mean_z_robust',
+    'max_abs_z_robust',
+    'positional_chisq_robust',
+    'overlap_count_robust',
+    'overlap_ratio_robust',
+    'entropy',
+    'max_support',
+]
+
 DATASET_CONFIG_COLUMNS = [
     'target_set_size', 'attacker_ratio', 'protocol',
     'splits', 'epsilon', 'dataset_type'
@@ -72,19 +94,43 @@ DATASET_CONFIG_COLUMNS = [
 
 DATASET_TYPES = ['zipf', 'emoji', 'fire']
 
-DEFAULT_PCA_DIM = 16
+DEFAULT_PCA_DIM = 32
 DEFAULT_KNN_K = 10
 
 DEFAULT_GNN_HIDDEN_DIM = 64
 DEFAULT_GNN_NUM_HEADS = 4
 DEFAULT_GNN_LAMBDA_AGG = 0.1
+DEFAULT_GNN_LAMBDA_UTILITY = 0.1
 DEFAULT_GNN_PATIENCE = 10
 DEFAULT_GNN_K_FOLDS = 5
 DEFAULT_GNN_BATCH_SIZE = 32
-DEFAULT_GNN_INPUT_DIM = 24  # 16 PCA + 4 density + 3 influence + 1 epsilon
+DEFAULT_GNN_INPUT_DIM = 44  # 32 PCA + 4 density + 3 influence + 1 epsilon + 4 user stats
 
 DEFAULT_GNN_HP_GRID = {
-    'lambda_agg':  [0.05, 0.1, 0.2],
-    'num_heads':   [2, 4, 8],
-    'init_method': ['xavier_uniform', 'kaiming', 'orthogonal'],
+    'lambda_agg':      [0.05, 0.1, 0.2],
+    'lambda_utility':  [0.01, 0.1, 0.2],
+    'num_heads':       [2, 4, 8],
+    'init_method':     ['orthogonal', 'xavier_uniform', 'kaiming']
+}
+
+DEFAULT_TABULAR_HP_GRID = {
+    'lr':      [0.0005, 0.001, 0.003],
+    'dropout': [0.1, 0.2, 0.3],
+}
+
+
+DEFAULT_HIDDEN_SIZE_GRID = [
+    [256, 128, 64],
+    [128, 64, 32],
+    [64, 32, 16],
+    [64, 64, 32, 16],
+]
+
+DEFAULT_FT_TRANSFORMER_GRID = {
+    'd_token':           [32, 64, 128],
+    'n_heads':           [4, 8],
+    'n_layers':          [1, 2, 3],
+    'ffn_d_multiplier':  [1.33],
+    'attention_dropout': [0.1, 0.2],
+    'residual_dropout':  [0.0, 0.1],
 }
