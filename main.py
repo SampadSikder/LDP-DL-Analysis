@@ -1,35 +1,4 @@
 #!/usr/bin/env python
-"""
-
-Usage:
-    # Conventional (random split), no CV:
-    python main.py --data-path /path/to/output_dir --model mlp --epochs 10
-
-    # K-fold cross-validation only:
-    python main.py --data-path /path/to/output_dir --model mlp --k-folds 5 --cv-only
-
-    # K-fold CV + final training + test evaluation:
-    python main.py --data-path /path/to/output_dir --model mlp --k-folds 5 --patience 10
-
-    # Cross-dataset generalization with CV:
-    python main.py --data-path /path/to/output_dir --model mlp \\
-        --training-method cross --train-dataset zipf --test-dataset emoji --k-folds 5
-
-    # Cross-dataset with combined training types + HP grid search (default when k-folds > 0):
-    python main.py --data-path /path/to/output_dir --model mlp \\
-        --training-method cross --train-dataset zipf emoji --test-dataset fire --k-folds 5
-
-    # Same, but skip HP search and use --lr/--dropout directly:
-    python main.py --data-path /path/to/output_dir --model mlp \\
-        --training-method cross --train-dataset zipf emoji --test-dataset fire \\
-        --k-folds 5 --no-hp-search
-
-    # Also grid-search pos_weight (auto + a couple fixed values):
-    python main.py --data-path /path/to/output_dir --model mlp \\
-        --training-method cross --train-dataset zipf emoji --test-dataset fire \\
-        --k-folds 5 --hp-pos-weight auto 1.0 5.77
-"""
-
 import argparse
 import os
 import numpy as np
