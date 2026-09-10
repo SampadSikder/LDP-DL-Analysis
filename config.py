@@ -87,8 +87,6 @@ DATASET_FEATURE_NAMES = [
     'max_support',
 ]
 
-DEFAULT_ROBUST_ITERATIONS = 2
-
 DATASET_CONFIG_COLUMNS = [
     'target_set_size', 'attacker_ratio', 'protocol',
     'splits', 'epsilon', 'dataset_type'

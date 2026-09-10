@@ -218,8 +218,9 @@ def extract_user_level_features_diffstats_style(
 
     support_probs = support / (one_list[:, np.newaxis] + 1e-10)
     positive = support_probs > 0
+    safe_probs = np.where(positive, support_probs, 1.0)
     support_entropy = -(
-        np.where(positive, support_probs * np.log(support_probs + 1e-10), 0.0)
+        np.where(positive, safe_probs * np.log(safe_probs), 0.0)
     ).sum(axis=1)
     support_entropy_scaled = support_entropy / math.log(domain)
 
