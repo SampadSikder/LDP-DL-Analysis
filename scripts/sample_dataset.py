@@ -21,16 +21,17 @@ BATCH_ROWS_DEFAULT = 2_000_000
 STRATA_COLS = [_CONF_EPSILON, _CONF_DATASET_TYPE, _CONF_ATTACKER_RATIO, _CONF_TARGET_SET_SIZE, _CONF_SPLITS]
 
 
-def build_group_index(config_mm: np.ndarray, protocol: str, chunk_rows: int):
-    """Scan config.npy in chunks, return {stratum_key: np.array of global row indices} for `protocol`."""
+def build_group_index(config_mm: np.ndarray, protocols: list, chunk_rows: int):
+    """Scan config.npy once, return ({"<protocol>::<stratum_key>": index array}, {protocol: total_matched})."""
     groups = defaultdict(list)
+    totals = defaultdict(int)
+    protocol_set = set(protocols)
     n_rows = config_mm.shape[0]
-    total_matched = 0
 
     for start in range(0, n_rows, chunk_rows):
         end = min(start + chunk_rows, n_rows)
         chunk = np.asarray(config_mm[start:end])  # materialize this chunk only
-        mask = chunk[:, _CONF_PROTOCOL] == protocol
+        mask = np.isin(chunk[:, _CONF_PROTOCOL], list(protocol_set))
         if not mask.any():
             continue
         local_idx = np.nonzero(mask)[0]
@@ -40,28 +41,43 @@ def build_group_index(config_mm: np.ndarray, protocol: str, chunk_rows: int):
         keys = sub[:, STRATA_COLS[0]]
         for col in STRATA_COLS[1:]:
             keys = np.char.add(np.char.add(keys, '|'), sub[:, col])
+        combined_keys = np.char.add(np.char.add(sub[:, _CONF_PROTOCOL], '::'), keys)
 
-        for key in np.unique(keys):
-            groups[key].append(global_idx[keys == key])
+        for key in np.unique(combined_keys):
+            idxs = global_idx[combined_keys == key]
+            groups[key].append(idxs)
+            totals[key.split('::', 1)[0]] += len(idxs)
 
-        total_matched += len(global_idx)
-        print(f"  scanned {end:,}/{n_rows:,} rows, matched so far: {total_matched:,}")
+        print(f"  scanned {end:,}/{n_rows:,} rows, matched so far: {sum(totals.values()):,}")
 
     groups = {k: np.concatenate(v) for k, v in groups.items()}
-    return groups, total_matched
+    return groups, totals
 
 
-def choose_sample_indices(groups: dict, n_target: int, seed: int) -> np.ndarray:
-    total_matched = sum(len(v) for v in groups.values())
+def choose_sample_indices(groups: dict, totals: dict, protocols: list, n_target: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     chosen = []
-    for key, idx in groups.items():
-        target = round(n_target * len(idx) / total_matched)
-        target = min(target, len(idx))
-        if target == len(idx):
-            chosen.append(idx)
-        else:
-            chosen.append(rng.choice(idx, size=target, replace=False))
+    for protocol in protocols:
+        total_matched = totals.get(protocol, 0)
+        if total_matched == 0:
+            print(f"  [WARN] No rows found for protocol={protocol}; skipping")
+            continue
+        if total_matched < n_target:
+            print(f"  [WARN] Only {total_matched:,} rows available for {protocol}, "
+                  f"less than requested {n_target:,}; using all of them")
+
+        proto_prefix = protocol + '::'
+        for key, idx in groups.items():
+            if not key.startswith(proto_prefix):
+                continue
+            target = round(n_target * len(idx) / total_matched)
+            target = min(target, len(idx))
+            if target == len(idx):
+                chosen.append(idx)
+            else:
+                chosen.append(rng.choice(idx, size=target, replace=False))
+        print(f"  {protocol}: selected up to {n_target:,} (of {total_matched:,} available)")
+
     result = np.concatenate(chosen)
     result.sort()
     return result
@@ -104,10 +120,13 @@ def write_sampled_dataset(data_dir: str, output_dir: str, idx: np.ndarray, batch
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('data_dir', help='Finalized source dataset directory')
-    parser.add_argument('--protocol', required=True,
+    parser.add_argument('--protocol', required=True, nargs='+',
                          choices=['OUE', 'OLH_Server', 'OLH_User', 'HST_Server', 'HST_User'],
-                         help='Protocol to filter and sample')
-    parser.add_argument('--n', type=int, required=True, dest='n_target', help='Target number of sampled rows')
+                         help='Protocol(s) to filter and sample. With multiple protocols, --n rows are '
+                              'sampled independently from EACH one (e.g. 3 protocols + --n 10000000 = '
+                              '30,000,000 rows total in one output directory).')
+    parser.add_argument('--n', type=int, required=True, dest='n_target',
+                         help='Target number of sampled rows PER protocol')
     parser.add_argument('--output', '-o', required=True, help='Output directory for the sampled dataset')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--chunk-rows', type=int, default=CHUNK_ROWS_DEFAULT,
@@ -118,19 +137,16 @@ def main():
 
     config_mm = np.load(os.path.join(args.data_dir, 'config.npy'), mmap_mode='r')
 
-    print(f"Scanning config.npy for protocol={args.protocol}...")
-    groups, total_matched = build_group_index(config_mm, args.protocol, args.chunk_rows)
-    print(f"Total matching rows: {total_matched:,} across {len(groups):,} "
-          f"(epsilon, dataset_type, ratio, target_size, splits) strata")
+    print(f"Scanning config.npy for protocol(s)={args.protocol}...")
+    groups, totals = build_group_index(config_mm, args.protocol, args.chunk_rows)
+    for protocol in args.protocol:
+        print(f"  {protocol}: {totals.get(protocol, 0):,} matching rows")
 
-    if total_matched == 0:
-        raise ValueError(f"No rows found for protocol={args.protocol} in {args.data_dir}")
-    if total_matched < args.n_target:
-        print(f"  [WARN] Only {total_matched:,} rows available, less than requested {args.n_target:,}; "
-              f"using all of them")
+    if not totals:
+        raise ValueError(f"No rows found for protocol(s)={args.protocol} in {args.data_dir}")
 
-    idx = choose_sample_indices(groups, args.n_target, args.seed)
-    print(f"Selected {len(idx):,} rows")
+    idx = choose_sample_indices(groups, totals, args.protocol, args.n_target, args.seed)
+    print(f"Selected {len(idx):,} rows total")
 
     print(f"Writing sampled dataset to {args.output}...")
     write_sampled_dataset(args.data_dir, args.output, idx, args.batch_rows)
