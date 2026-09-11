@@ -73,7 +73,7 @@ def build_tasks(args) -> list:
                                     'dataset_type': dataset_type,
                                     'h_ao': 1,
                                     'seed': seed,
-                                    'inner_processors': 1 if protocol.startswith('OLH') else args.inner_processors,
+                                    'inner_processors': args.inner_processors, # not nested so use multi core
                                     'olh_setting': olh_setting,
                                     'exp_i': exp_i,
                                     'desc': (
