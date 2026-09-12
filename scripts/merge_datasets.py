@@ -31,7 +31,7 @@ def validate_inputs(dirs: list) -> list:
         stats = load_norm_stats(d)
         if feature_names_ref is None:
             feature_names_ref = stats['feature_names']
-        elif stats['feature_names'] != feature_names_ref:s
+        elif stats['feature_names'] != feature_names_ref:
             raise ValueError(
                 f"{d} has different feature_names than {dirs[0]} -- "
                 f"these datasets were generated with different feature extraction code "
