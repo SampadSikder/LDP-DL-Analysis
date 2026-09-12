@@ -1,9 +1,11 @@
 import argparse
 import json
+import math
 import os
 import re
 import sys
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -121,28 +123,66 @@ def merge_labels_and_config(dirs: list):
     return merged_labels, merged_config, experiment_offsets
 
 
-def merge_metadata(dirs: list, experiment_offsets: list, out_path: str):
+def _read_entries(path: str, name_pairs: list) -> list:
+    """Open `path` once and read the given (name, new_name) entries. Runs in a worker process."""
+    with zipfile.ZipFile(path, 'r') as zin:
+        return [(new_name, zin.read(name)) for name, new_name in name_pairs]
+
+
+def merge_metadata(dirs: list, experiment_offsets: list, out_path: str, workers: int = None):
     paths = [os.path.join(d, 'metadata.npz') for d in dirs]
     if not all(os.path.exists(p) for p in paths):
         print("  [SKIP] Not all input directories have metadata.npz -- skipping metadata merge")
         return
 
+    workers = workers or os.cpu_count() or 1
     pattern = re.compile(r'^graph_(\d+)_(.+)$')
-    with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
-        for path, offset in zip(paths, experiment_offsets):
-            with zipfile.ZipFile(path, 'r') as zin:
-                for name in zin.namelist():
-                    m = pattern.match(name)
-                    if not m:
-                        zout.writestr(name, zin.read(name))
-                        continue
-                    idx = int(m.group(1)) + offset
-                    new_name = f"graph_{idx:06d}_{m.group(2)}"
-                    zout.writestr(new_name, zin.read(name))
+
+    # Build the rename plan up front (cheap: just reads each archive's central directory).
+    per_path_pairs = []
+    for path, offset in zip(paths, experiment_offsets):
+        with zipfile.ZipFile(path, 'r') as zin:
+            names = zin.namelist()
+        pairs = []
+        for name in names:
+            m = pattern.match(name)
+            if m:
+                idx = int(m.group(1)) + offset
+                new_name = f"graph_{idx:06d}_{m.group(2)}"
+            else:
+                new_name = name
+            pairs.append((name, new_name))
+        per_path_pairs.append((path, pairs))
+
+    total_entries = sum(len(pairs) for _, pairs in per_path_pairs)
+    print(f"  Copying {total_entries:,} metadata entries using {workers} worker processes.")
+    print("  Output is uncompressed (ZIP_STORED): these entries are packed float arrays "
+          "(pi_hat/pi_true/support_tensor) that DEFLATE barely shrinks, so recompressing "
+          "every entry single-threaded was the actual bottleneck, not the I/O.")
+
+    # Chunk each source archive's entries so a worker opens that zip once, not once per entry.
+    tasks = []
+    for path, pairs in per_path_pairs:
+        if not pairs:
+            continue
+        chunk_size = max(1, math.ceil(len(pairs) / workers))
+        for i in range(0, len(pairs), chunk_size):
+            tasks.append((path, pairs[i:i + chunk_size]))
+
+    written = 0
+    with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_STORED) as zout:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_read_entries, path, pairs) for path, pairs in tasks]
+            for future in as_completed(futures):
+                for new_name, data in future.result():
+                    zout.writestr(new_name, data)
+                    written += 1
+                print(f"  wrote {written:,}/{total_entries:,} entries")
+
     print(f"  Saved {out_path}")
 
 
-def merge(dirs: list, output_dir: str, chunk_rows: int):
+def merge(dirs: list, output_dir: str, chunk_rows: int, workers: int = None):
     os.makedirs(output_dir, exist_ok=True)
 
     print("Validating inputs...")
@@ -174,7 +214,7 @@ def merge(dirs: list, output_dir: str, chunk_rows: int):
         json.dump(norm_stats, f, indent=2)
 
     print("\nMerging metadata.npz...")
-    merge_metadata(dirs, experiment_offsets, os.path.join(output_dir, 'metadata.npz'))
+    merge_metadata(dirs, experiment_offsets, os.path.join(output_dir, 'metadata.npz'), workers=workers)
 
     print(f"\nDone. Merged dataset written to {output_dir}")
 
@@ -185,12 +225,14 @@ def main():
     parser.add_argument('--output', '-o', required=True, help='Output directory for the merged dataset')
     parser.add_argument('--chunk-rows', type=int, default=CHUNK_ROWS_DEFAULT,
                          help='Rows per streaming chunk when processing features.npy')
+    parser.add_argument('--workers', type=int, default=None,
+                         help='Worker processes for merging metadata.npz (default: os.cpu_count())')
     args = parser.parse_args()
 
     if len(args.data_dirs) < 2:
         parser.error("Provide at least two dataset directories to merge")
 
-    merge(args.data_dirs, args.output, args.chunk_rows)
+    merge(args.data_dirs, args.output, args.chunk_rows, workers=args.workers)
 
 
 if __name__ == '__main__':
