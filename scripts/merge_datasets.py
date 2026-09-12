@@ -123,10 +123,21 @@ def merge_labels_and_config(dirs: list):
     return merged_labels, merged_config, experiment_offsets
 
 
-def _read_entries(path: str, name_pairs: list) -> list:
-    """Open `path` once and read the given (name, new_name) entries. Runs in a worker process."""
+def _read_entries(path: str, name_pairs: list):
+    """Open `path` once and read the given (name, new_name) entries. Runs in a worker process.
+
+    Returns (good, failures). A single corrupt entry must not abort the whole merge, so
+    per-entry read errors (truncated/garbled DEFLATE streams from an interrupted or
+    still-running generation job) are collected and reported instead of raised.
+    """
+    good, failures = [], []
     with zipfile.ZipFile(path, 'r') as zin:
-        return [(new_name, zin.read(name)) for name, new_name in name_pairs]
+        for name, new_name in name_pairs:
+            try:
+                good.append((new_name, zin.read(name)))
+            except Exception as e:
+                failures.append((path, name, f"{type(e).__name__}: {e}"))
+    return good, failures
 
 
 def merge_metadata(dirs: list, experiment_offsets: list, out_path: str, workers: int = None):
@@ -170,20 +181,57 @@ def merge_metadata(dirs: list, experiment_offsets: list, out_path: str, workers:
             tasks.append((path, pairs[i:i + chunk_size]))
 
     written = 0
+    all_failures = []
     with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_STORED) as zout:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_read_entries, path, pairs) for path, pairs in tasks]
             for future in as_completed(futures):
-                for new_name, data in future.result():
+                good, failures = future.result()
+                for new_name, data in good:
                     zout.writestr(new_name, data)
                     written += 1
-                print(f"  wrote {written:,}/{total_entries:,} entries")
+                all_failures.extend(failures)
+                print(f"  wrote {written:,}/{total_entries:,} entries"
+                      f"{f' ({len(all_failures):,} unreadable)' if all_failures else ''}")
 
-    print(f"  Saved {out_path}")
+    print(f"  Saved {out_path}  ({written:,}/{total_entries:,} entries)")
+
+    if all_failures:
+        print(f"\n  [WARN] {len(all_failures):,} entries could not be read and were skipped.")
+        for path, name, err in all_failures[:20]:
+            print(f"    {path} :: {name} -- {err}")
+        if len(all_failures) > 20:
+            print(f"    ... and {len(all_failures) - 20:,} more")
+        print("  These come from a source metadata.npz whose compressed data is damaged "
+              "(interrupted generation run, or the file was still being written while this read it). "
+              "Run scripts/repair_metadata_zip.py on the source to salvage what is recoverable.")
 
 
-def merge(dirs: list, output_dir: str, chunk_rows: int, workers: int = None):
+def compute_experiment_offsets(dirs: list) -> list:
+    
+    offsets = []
+    cumulative = 0
+    for d in dirs:
+        config = np.load(os.path.join(d, 'config.npy'), mmap_mode='r')
+        offsets.append(cumulative)
+        if config.shape[1] > _CONF_EXPERIMENT_ID:
+            cumulative += int(np.asarray(config[:, _CONF_EXPERIMENT_ID]).astype(np.int64).max()) + 1
+        del config
+    return offsets
+
+
+def merge(dirs: list, output_dir: str, chunk_rows: int, workers: int = None,
+          metadata_only: bool = False):
     os.makedirs(output_dir, exist_ok=True)
+
+    if metadata_only:
+        print("Metadata-only mode: reusing the features/labels/config already in "
+              f"{output_dir}, rebuilding only metadata.npz.")
+        experiment_offsets = compute_experiment_offsets(dirs)
+        merge_metadata(dirs, experiment_offsets, os.path.join(output_dir, 'metadata.npz'),
+                       workers=workers)
+        print(f"\nDone. metadata.npz rebuilt in {output_dir}")
+        return
 
     print("Validating inputs...")
     feature_names = validate_inputs(dirs)
@@ -227,12 +275,16 @@ def main():
                          help='Rows per streaming chunk when processing features.npy')
     parser.add_argument('--workers', type=int, default=None,
                          help='Worker processes for merging metadata.npz (default: os.cpu_count())')
+    parser.add_argument('--metadata-only', action='store_true',
+                         help='Rebuild only metadata.npz in an output directory whose '
+                              'features/labels/config were already merged successfully')
     args = parser.parse_args()
 
     if len(args.data_dirs) < 2:
         parser.error("Provide at least two dataset directories to merge")
 
-    merge(args.data_dirs, args.output, args.chunk_rows, workers=args.workers)
+    merge(args.data_dirs, args.output, args.chunk_rows, workers=args.workers,
+          metadata_only=args.metadata_only)
 
 
 if __name__ == '__main__':
