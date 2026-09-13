@@ -1,11 +1,10 @@
 import argparse
 import json
-import math
 import os
 import re
+import shutil
 import sys
 import zipfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -15,6 +14,8 @@ from attacker_detector.data.dataset import (  # noqa: E402
 )
 
 CHUNK_ROWS_DEFAULT = 2_000_000
+COPY_BUFFER_BYTES = 4 * 1024 * 1024
+PROGRESS_EVERY = 500
 
 
 def load_norm_stats(data_dir: str) -> dict:
@@ -123,30 +124,12 @@ def merge_labels_and_config(dirs: list):
     return merged_labels, merged_config, experiment_offsets
 
 
-def _read_entries(path: str, name_pairs: list):
-    """Open `path` once and read the given (name, new_name) entries. Runs in a worker process.
-
-    Returns (good, failures). A single corrupt entry must not abort the whole merge, so
-    per-entry read errors (truncated/garbled DEFLATE streams from an interrupted or
-    still-running generation job) are collected and reported instead of raised.
-    """
-    good, failures = [], []
-    with zipfile.ZipFile(path, 'r') as zin:
-        for name, new_name in name_pairs:
-            try:
-                good.append((new_name, zin.read(name)))
-            except Exception as e:
-                failures.append((path, name, f"{type(e).__name__}: {e}"))
-    return good, failures
-
-
 def merge_metadata(dirs: list, experiment_offsets: list, out_path: str, workers: int = None):
     paths = [os.path.join(d, 'metadata.npz') for d in dirs]
     if not all(os.path.exists(p) for p in paths):
         print("  [SKIP] Not all input directories have metadata.npz -- skipping metadata merge")
         return
 
-    workers = workers or os.cpu_count() or 1
     pattern = re.compile(r'^graph_(\d+)_(.+)$')
 
     # Build the rename plan up front (cheap: just reads each archive's central directory).
@@ -166,45 +149,54 @@ def merge_metadata(dirs: list, experiment_offsets: list, out_path: str, workers:
         per_path_pairs.append((path, pairs))
 
     total_entries = sum(len(pairs) for _, pairs in per_path_pairs)
-    print(f"  Copying {total_entries:,} metadata entries using {workers} worker processes.")
-    print("  Output is uncompressed (ZIP_STORED): these entries are packed float arrays "
+    total_bytes = sum(
+        info.file_size
+        for path, _ in per_path_pairs
+        for info in zipfile.ZipFile(path).infolist()
+    )
+    print(f"  Copying {total_entries:,} metadata entries ({total_bytes / 1e9:.1f} GB uncompressed).")
+    print("  Output is uncompressed (ZIP_STORED): these are packed float arrays "
           "(pi_hat/pi_true/support_tensor) that DEFLATE barely shrinks, so recompressing "
-          "every entry single-threaded was the actual bottleneck, not the I/O.")
+          "every entry was the original bottleneck.")
+    if workers:
+        print(f"  [NOTE] --workers {workers} is ignored here. A single support_tensor entry can be "
+              f"over a gigabyte (it is the full n_users x domain matrix), so entries are streamed "
+              f"one at a time at constant memory rather than batched into worker processes.")
 
-    # Chunk each source archive's entries so a worker opens that zip once, not once per entry.
-    tasks = []
-    for path, pairs in per_path_pairs:
-        if not pairs:
-            continue
-        chunk_size = max(1, math.ceil(len(pairs) / workers))
-        for i in range(0, len(pairs), chunk_size):
-            tasks.append((path, pairs[i:i + chunk_size]))
+    copied = 0
+    copied_bytes = 0
+    failures = []
+    with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zout:
+        for path, pairs in per_path_pairs:
+            with zipfile.ZipFile(path, 'r') as zin:
+                for name, new_name in pairs:
+                    try:
+                        with zin.open(name) as src, \
+                                zout.open(new_name, 'w', force_zip64=True) as dst:
+                            shutil.copyfileobj(src, dst, COPY_BUFFER_BYTES)
+                        copied_bytes += zin.getinfo(name).file_size
+                    except Exception as e:
+                        failures.append((path, name, f"{type(e).__name__}: {e}"))
+                    copied += 1
+                    if copied % PROGRESS_EVERY == 0 or copied == total_entries:
+                        print(f"  copied {copied:,}/{total_entries:,} entries "
+                              f"({copied_bytes / 1e9:.1f} GB)"
+                              f"{f' -- {len(failures):,} failed' if failures else ''}",
+                              flush=True)
 
-    written = 0
-    all_failures = []
-    with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_STORED) as zout:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_read_entries, path, pairs) for path, pairs in tasks]
-            for future in as_completed(futures):
-                good, failures = future.result()
-                for new_name, data in good:
-                    zout.writestr(new_name, data)
-                    written += 1
-                all_failures.extend(failures)
-                print(f"  wrote {written:,}/{total_entries:,} entries"
-                      f"{f' ({len(all_failures):,} unreadable)' if all_failures else ''}")
+    print(f"  Saved {out_path}  ({copied - len(failures):,}/{total_entries:,} entries)")
 
-    print(f"  Saved {out_path}  ({written:,}/{total_entries:,} entries)")
-
-    if all_failures:
-        print(f"\n  [WARN] {len(all_failures):,} entries could not be read and were skipped.")
-        for path, name, err in all_failures[:20]:
+    if failures:
+        print(f"\n  [WARN] {len(failures):,} entries could not be read from the source:")
+        for path, name, err in failures[:20]:
             print(f"    {path} :: {name} -- {err}")
-        if len(all_failures) > 20:
-            print(f"    ... and {len(all_failures) - 20:,} more")
-        print("  These come from a source metadata.npz whose compressed data is damaged "
-              "(interrupted generation run, or the file was still being written while this read it). "
-              "Run scripts/repair_metadata_zip.py on the source to salvage what is recoverable.")
+        if len(failures) > 20:
+            print(f"    ... and {len(failures) - 20:,} more")
+        print("  Their source data is damaged (interrupted generation run, or the file was still "
+              "being written while this read it). Because entries are streamed, a failure part-way "
+              "through leaves a TRUNCATED entry of that name in the output -- treat the names above "
+              "as unusable. Run scripts/repair_metadata_zip.py on the source to salvage what is "
+              "recoverable, then re-run with --metadata-only.")
 
 
 def compute_experiment_offsets(dirs: list) -> list:
