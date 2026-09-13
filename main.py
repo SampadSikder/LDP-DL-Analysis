@@ -28,6 +28,28 @@ from attacker_detector.training.trainer import run_k_fold_cv, run_hp_search_cv
 from attacker_detector.analysis import run_sensitivity_analysis, plot_sensitivity_metric
 
 
+FT_HP_TYPES = {
+    'd_token': int,
+    'n_heads': int,
+    'n_layers': int,
+    'ffn_d_multiplier': float,
+    'attention_dropout': float,
+    'residual_dropout': float,
+}
+
+
+def _validate_ft_dims(d_tokens, n_heads_list, parser=None):
+    """d_token must divide evenly by n_heads -- catch it now, not hours into a grid search."""
+    bad = [(d, h) for d in d_tokens for h in n_heads_list if d % h != 0]
+    if bad:
+        combos = ', '.join(f"d_token={d}/n_heads={h}" for d, h in bad[:8])
+        msg = (f"invalid FT-Transformer dimensions: {combos}"
+               f"{' ...' if len(bad) > 8 else ''}. d_token must be divisible by n_heads.")
+        if parser:
+            parser.error(msg)
+        raise ValueError(msg)
+
+
 def _save_cv_summary(cv_results: dict, output_dir: str) -> str:
     """Save the mean/std summary of a k-fold CV run to cv_summary.csv."""
     summary_df = pd.DataFrame([
@@ -208,6 +230,23 @@ def parse_args():
              "Not searched by default. Pass 'default' to use config.DEFAULT_HIDDEN_SIZE_GRID."
     )
 
+    # FT-Transformer architecture hyperparameters. --<key> pins a value (used with
+    # --no-hp-search / --k-folds 0, and collapses that axis during search);
+    # --hp-<key> narrows what the grid search explores.
+    for ft_key, ft_cast in FT_HP_TYPES.items():
+        dashed = ft_key.replace('_', '-')
+        parser.add_argument(
+            f'--{dashed}', type=ft_cast, default=None, dest=ft_key,
+            help=f"FT-Transformer {ft_key} (single value). Used directly with "
+                 f"--no-hp-search or --k-folds 0; pins this axis during HP search."
+        )
+        parser.add_argument(
+            f'--hp-{dashed}', type=ft_cast, nargs='+', default=None, dest=f'hp_{ft_key}',
+            help=f"{ft_key} values to grid search "
+                 f"(default: config.DEFAULT_FT_TRANSFORMER_GRID[{ft_key!r}] = "
+                 f"{DEFAULT_FT_TRANSFORMER_GRID[ft_key]})"
+        )
+
     parser.add_argument(
         '--training-method',
         type=str,
@@ -319,7 +358,14 @@ def main():
     best_dropout = args.dropout
     best_pos_weight = pos_weight_arg
     best_hidden_sizes = args.hidden_sizes
-    best_ft_config = {}
+    # Pinned --<key> values are the starting point; an HP search overwrites them below.
+    best_ft_config = {
+        key: getattr(args, key)
+        for key in FT_TRANSFORMER_HP_KEYS
+        if getattr(args, key) is not None
+    }
+    if args.model == 'ft_transformer' and 'd_token' in best_ft_config and 'n_heads' in best_ft_config:
+        _validate_ft_dims([best_ft_config['d_token']], [best_ft_config['n_heads']])
 
     if args.k_folds > 0:
         if 'X_trainval' in split:
@@ -345,6 +391,7 @@ def main():
                 seed=args.seed,
                 pos_weight=pos_weight_arg,
                 hidden_sizes=args.hidden_sizes,
+                ft_config=best_ft_config or None,
             )
 
             if args.output_dir:
@@ -361,7 +408,22 @@ def main():
             hp_grid['lr'] = args.hp_lr if args.hp_lr is not None else DEFAULT_TABULAR_HP_GRID['lr']
             if args.model == 'ft_transformer':
                 for key in FT_TRANSFORMER_HP_KEYS:
-                    hp_grid[key] = DEFAULT_FT_TRANSFORMER_GRID[key]
+                    searched = getattr(args, f'hp_{key}')
+                    pinned = getattr(args, key)
+                    if searched is not None:
+                        hp_grid[key] = searched
+                    elif pinned is not None:
+                        hp_grid[key] = [pinned]
+                    else:
+                        hp_grid[key] = DEFAULT_FT_TRANSFORMER_GRID[key]
+                _validate_ft_dims(hp_grid['d_token'], hp_grid['n_heads'])
+                n_configs = 1
+                for values in hp_grid.values():
+                    n_configs *= len(values)
+                print(f"\nHP grid: {n_configs} configs x {args.k_folds} folds = "
+                      f"{n_configs * args.k_folds} training runs")
+                for key, values in hp_grid.items():
+                    print(f"  {key}: {values}")
             else:
                 hp_grid['dropout'] = args.hp_dropout if args.hp_dropout is not None else DEFAULT_TABULAR_HP_GRID['dropout']
             if args.hp_pos_weight is not None:
