@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.model_selection import train_test_split
 
 from config import (
     DEFAULT_EPOCHS,
@@ -282,8 +283,33 @@ def parse_args():
         choices=DATASET_TYPES,
         help='dataset_type used for evaluation (required for three-way)'
     )
+    parser.add_argument(
+        '--protocol',
+        type=str,
+        default=None,
+        help='Keep only rows with this protocol, e.g. OUE, OLH_Server, HST_User, HST_Server'
+    )
+    parser.add_argument(
+        '--dataset',
+        type=str,
+        default=None,
+        choices=DATASET_TYPES,
+        help='Keep only rows with this dataset_type (training-method none only)'
+    )
+    parser.add_argument(
+        '--max-samples',
+        type=int,
+        default=None,
+        help='Randomly subsample to at most this many rows (stratified by label), '
+             'applied after --protocol/--dataset filtering and before splitting'
+    )
 
     args = parser.parse_args()
+
+    if args.dataset and args.training_method != 'none':
+        parser.error("--dataset only applies to --training-method none")
+    if args.max_samples is not None and args.max_samples < 1:
+        parser.error("--max-samples must be a positive integer")
 
     if args.training_method in ('cross', 'three-way'):
         if not args.train_dataset or not args.test_dataset:
@@ -313,6 +339,31 @@ def main():
     print(f"Using device: {device}")
     print(f"\nLoading dataset from: {args.data_path}")
     ds = load_npy_dataset(args.data_path)
+
+    idx = np.arange(len(ds))
+    if args.protocol:
+        idx = idx[ds.protocols[idx] == args.protocol]
+    if args.dataset:
+        idx = idx[ds.dataset_types[idx] == args.dataset]
+    if len(idx) == 0:
+        raise ValueError(
+            f"No rows for protocol={args.protocol!r}, dataset={args.dataset!r}. "
+            f"Available protocols: {sorted(set(ds.protocols))}"
+        )
+    if args.max_samples and len(idx) > args.max_samples:
+        idx, _ = train_test_split(
+            idx,
+            train_size=args.max_samples,
+            random_state=args.seed,
+            stratify=ds.labels[idx].astype(int),
+        )
+        idx = np.sort(idx)
+    if len(idx) < len(ds):
+        ds.features = ds.features[idx]
+        ds.labels = ds.labels[idx]
+        ds.config = ds.config[idx]
+        print(f"Using {len(ds):,} rows (protocol={args.protocol or 'all'}, "
+              f"dataset={args.dataset or 'all'}, max_samples={args.max_samples or 'all'})")
 
     n_features = ds.features.shape[1]
     print(f"Feature count: {n_features}")

@@ -258,11 +258,16 @@ python main.py -d output/my_dataset -m mlp \
 
 # Skip HP grid search, use --lr/--dropout directly for CV + final training
 python main.py -d output/my_dataset -m mlp --k-folds 5 --no-hp-search
+
+# One protocol, train on zipf+emoji, test on unseen fire, capped at 200k rows
+python main.py -d output/my_dataset -m ft_transformer --protocol OUE \
+    --training-method cross --train-dataset zipf emoji --test-dataset fire \
+    --max-samples 200000 -o results/ft_transformer/OUE/train_zipf+emoji_test_fire
 ```
 
 ### Training Pipeline
 
-1. **Load NPY dataset** from directory (features are pre-normalized)
+1. **Load NPY dataset** from directory (features are pre-normalized), then optionally filter by `--protocol` / `--dataset` and subsample with `--max-samples`
 2. **Split data** into train / val / test (stratified)
 3. **K-fold CV** on train+val, with HP grid search by default (`--k-folds`, `--no-hp-search`)
 4. **Final training** with early stopping on val F1 (`--patience`), using the best HP config found by CV
@@ -273,7 +278,10 @@ python main.py -d output/my_dataset -m mlp --k-folds 5 --no-hp-search
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--data-path`, `-d` | Path to NPY dataset directory | *required* |
-| `--model`, `-m` | Model type: `mlp`, `gan`, `attention` | *required* |
+| `--model`, `-m` | Model type: `mlp`, `gan`, `attention`, `ft_transformer` | *required* |
+| `--protocol` | Keep only rows with this protocol (exact string stored in `config.npy`, e.g. `OUE`, `OLH_Server`, `HST_User`, `HST_Server`) | None (all) |
+| `--dataset` | Keep only rows with this dataset type: `zipf`, `emoji`, `fire`. `--training-method none` only | None (all) |
+| `--max-samples` | Stratified random subsample to at most this many rows, after filtering and before the train/val/test split | None (all) |
 | `--epochs`, `-e` | Max training epochs | 5 |
 | `--batch-size`, `-b` | Batch size | 256 |
 | `--lr` | Learning rate (fallback when HP search is skipped, or for values not in the grid) | 0.001 |
@@ -293,6 +301,82 @@ python main.py -d output/my_dataset -m mlp --k-folds 5 --no-hp-search
 | `--seed` | Random seed | 42 |
 | `--output-dir`, `-o` | Save model/plots/results here | None |
 | `--no-plot` | Skip sensitivity plots | False |
+
+### Evaluation Protocol: Per-Protocol Models, Cross-Dataset Evaluation
+
+**Protocols are modelled separately.** Each LDP protocol perturbs reports differently, so its theoretical
+prior differs, and so does the shape of an effective poisoning attack:
+
+- **OUE** perturbs a one-hot vector over the full domain. The attacker needs no search: given ε, they can
+  pick an effective threshold (how many bits to set) directly.
+- **OLH** hashes the domain into a much smaller range `g = round(e^ε) + 1`, which changes the theoretical
+  estimate (`construct_omega` computes `p`/`q` from `g`, not `d`). The attacker must also search for hash
+  functions that map as many target items as possible into one bucket to maximise attack potential.
+- **HST** reports a single signed bit against a public random vector (`p_binomial = 1/2`), with the
+  caveats described under [Feature Set](#feature-set).
+
+These differences produce detectors that don't transfer between protocols, so one model is trained and
+evaluated per protocol (`--protocol`), and results are never pooled across protocols.
+
+**Datasets are the generalization axis.** The detector is assumed to know nothing about the true data
+distribution beyond the public protocol parameters `(ε, protocol, domain)`. Every feature is built from
+those alone (see [Feature Set](#feature-set)). A detector trained on one dataset should therefore infer on
+another, so the main evaluation trains on some datasets and tests on a different one, within a single
+protocol.
+
+`--protocol` filters rows before any splitting and works with every `--training-method`. `--dataset`
+restricts a `none` run to a single dataset.
+
+**Cross-dataset evaluation (main result).** For each protocol, leave one dataset out (4 protocols × 3
+held-out datasets = 12 runs):
+
+```bash
+for proto in OUE OLH_Server HST_User HST_Server; do
+  for test in zipf emoji fire; do
+    train=$(printf '%s\n' zipf emoji fire | grep -vx "$test" | tr '\n' ' ')
+    python main.py -d output/my_dataset -m ft_transformer \
+        --protocol "$proto" \
+        --training-method cross --train-dataset $train --test-dataset "$test" \
+        -o "results/ft_transformer/${proto}/train_${train// /+}test_${test}"
+  done
+done
+```
+
+Use `--training-method three-way` (e.g. `--train-dataset zipf --test-dataset emoji --eval-dataset fire`)
+to train on a single dataset and test on the other two. In cross modes the HP search and early stopping
+only see the training datasets, so the test dataset stays unseen until final evaluation.
+
+**In-dataset baseline.** Train and test on the same dataset (random row split), per protocol (12 runs). The
+gap between this and the cross-dataset score measures how much is lost when moving to an unseen
+distribution:
+
+```bash
+for proto in OUE OLH_Server HST_User HST_Server; do
+  for ds in zipf emoji fire; do
+    python main.py -d output/my_dataset -m ft_transformer \
+        --protocol "$proto" --dataset "$ds" \
+        -o "results/ft_transformer/${proto}/in_${ds}"
+  done
+done
+```
+
+Check the protocol strings actually present before running — the filter is an exact match:
+
+```bash
+python -c "import numpy as np, collections; c = np.load('output/my_dataset/config.npy', allow_pickle=True); \
+print(collections.Counter(zip(c[:, 5], c[:, 2])))"
+```
+
+`--max-samples` caps the total rows **before** splitting. In `none` mode with the defaults
+(`--test-size 0.2`, `--val-size 0.15`) about 65% of them end up in training. In `cross`/`three-way` modes
+the cap covers train, test and eval datasets together, so each gets roughly its share of the sample. The subsample is stratified by label and seeded by
+`--seed`, so it is reproducible. It does not reduce load-time memory: `features.npy` and `config.npy` are
+still read in full, then indexed. Since all features are computed per experiment at generation time,
+dropping rows does not change the feature values of the rows kept.
+
+Note that `none` mode splits at the row level, so users from the same experiment can appear in both train
+and test. Attackers in an experiment share a target set, so the in-dataset baseline is somewhat
+optimistic. Cross-dataset runs don't have this issue.
 
 ### Hyperparameter Grid Search
 
