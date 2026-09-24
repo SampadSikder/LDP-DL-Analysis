@@ -31,7 +31,8 @@ def construct_omega(epsilon: float, domain: int, perturb_method: str) -> np.ndar
     elif perturb_method in ('OLH_User', 'OLH_Server', 'OLH'):
         g = int(round(math.exp(epsilon))) + 1
         p = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
-        q = 1 / (math.exp(epsilon) + g - 1)
+        # A non-true item is supported when it hashes to the reported bucket: prob 1/g
+        q = 1 / g
         p_bin = (1 / domain) * (p + (domain - 1) * q)
         if p_bin is None:
             p_bin = 0.0

@@ -320,30 +320,35 @@ def find_hash_function(seed_list, target_set, domain_eliminate, g, num_map_AO):
     return best_seed, best_gap, best_target_mapped, best_hash_value
 
 
-def process_attacker_User(i, n, ratio, target_set, g, domain, splits, e, h_ao):
+def process_attacker_User(attacker_args, n, ratio, target_set, g, domain, splits):
+    '''
+    Craft one OLH-User fake report.
+    :param attacker_args: (i, attacker_seed, num_map_AO) where num_map_AO is the
+        support count this fake user aims for (drawn from omega under APA)
+    :return: (index in User_Seed, attack_vector)
+    '''
+    i, attacker_seed, num_map_AO = attacker_args
+    # Per-attacker RNG: forked pool workers would otherwise share random state
+    rng = random.Random(int(attacker_seed))
     average_project_hash = int(domain / g)
     vector = np.zeros(domain, dtype=int)
-    h_ao = int(h_ao)
     if splits < average_project_hash:
         # Split the target set for each user
-        splits_list = random.sample(list(target_set), splits)
-        # Gap between average mapping
-        num_map = average_project_hash
-        # Remaining set (unused in this snippet but kept for completeness)
-        remaining_set = set(range(domain)) - set(target_set)
-        # Adaptive gap between average mapping
-        num_map_AO = random.randint(num_map - h_ao, num_map + h_ao)
-        # theoretical APA use the omega_list to replace the num_map_AO num_map_AO = np.random.choice([i for i in range(domain)], construct_omega(e, domain, 'OLH_User'))
-        #num_map_AO = np.random.choice([i for i in range(domain)], construct_omega(e, domain, 'OLH_User'))
-        seed_list = random.sample(range(1, 10000000), num_samples)
+        splits_list = rng.sample(sorted(target_set), splits)
+        # Every other item counts toward the bucket size, so the crafted
+        # report's support is matched to num_map_AO as a whole
+        remaining_set = set(range(domain)) - set(splits_list)
+        seed_list = rng.sample(range(1, 10000000), num_samples)
         best_seed, best_gap, current_max_target_mapped, best_hash_value = find_hash_function(seed_list, splits_list,
                                                                                              remaining_set, g,
-                                                                                             num_map_AO)
+                                                                                             int(num_map_AO))
     else:
         print('splits > averge_project_hash')
         exit(0)
     # Calculate the index in User_Seed to update
     index = int(n * (1 - ratio) + i)
+    # find_hash_function returns every tied bucket; report the first
+    best_hash_value = int(best_hash_value[0])
     for v in range(domain):
         hashed_value = xxhash.xxh3_64(str(v).encode(), seed=int(best_seed)).intdigest() % g
         if hashed_value == best_hash_value:
@@ -352,8 +357,31 @@ def process_attacker_User(i, n, ratio, target_set, g, domain, splits, e, h_ao):
     return index, vector
 
 
-def build_support_list_1_OLH(domain, Y, n, User_Seed, ratio, g, target_set, p, splits, e, h_ao=0, processor=100):
+def build_support_list_1_OLH(domain, Y, n, User_Seed, ratio, g, target_set, p, splits, h_ao=0, e=1.0, processor=100):
+    '''
+    build the support list matrix under OLH-User
+    :param h_ao: 1 runs APA (support count drawn from omega); any other value
+        runs MGA-A with support count d/g jittered by up to 10*h_ao
+    :param e: privacy budget epsilon
+    '''
     #K_values, K_probs = calculate_prob_according_sample_size(num_samples, domain, g, h_ao, target_set, splits)
+
+    # Calculate the number of attackers
+    num_attackers = int(round(n * ratio))
+
+    h_ao = int(h_ao)
+    if h_ao == 1:
+        # APA: each fake user targets a support count drawn from the genuine-user distribution
+        omega_probs = construct_omega(e, domain, 'OLH_User')
+        num_map_list = np.random.choice(np.arange(domain), size=num_attackers, p=omega_probs)
+    else:
+        # MGA-A: expected support d/g with uniform jitter
+        num_map = int(domain / g)
+        jitter = 10 * h_ao
+        num_map_list = np.random.randint(num_map - jitter, num_map + jitter + 1, size=num_attackers)
+        num_map_list = np.maximum(num_map_list, 0)
+    attacker_seeds = np.random.randint(0, 2**31 - 1, size=num_attackers)
+    attacker_args = list(zip(range(num_attackers), attacker_seeds, num_map_list))
 
     # Prepare the partial function with fixed arguments for multiprocessing
     process_attacker_partial = partial(
@@ -364,18 +392,13 @@ def build_support_list_1_OLH(domain, Y, n, User_Seed, ratio, g, target_set, p, s
         g=g,
         domain=domain,
         splits=splits,
-        h_ao= 10*h_ao,
-        e=e,
     )
-
-    # Calculate the number of attackers
-    num_attackers = int(round(n * ratio))
 
     # Parallel execution of process_attacker using multiprocessing
     with Pool(processes=processor) as pool:
         # Use imap to process in parallel and tqdm for progress bar
         results = list(tqdm(
-            pool.imap(process_attacker_partial, range(num_attackers)),
+            pool.imap(process_attacker_partial, attacker_args),
             total=num_attackers,
             desc='Finding optimal seeds'
         ))
