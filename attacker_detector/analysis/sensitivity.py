@@ -24,6 +24,16 @@ from attacker_detector.data.dataset import (
 )
 
 
+_OAT_PARAMS = ('epsilon', 'attacker_ratio', 'target_set_size', 'splits')
+
+
+def _sort_values(vals):
+    try:
+        return sorted(vals, key=float)
+    except (TypeError, ValueError):
+        return sorted(vals)
+
+
 def run_sensitivity_analysis(
     model: nn.Module,
     X_test: np.ndarray,
@@ -31,6 +41,7 @@ def run_sensitivity_analysis(
     device: torch.device,
     config_array: Optional[np.ndarray] = None,
     batch_size: int = 4096,
+    oat_defaults: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Evaluate model performance across parameter values.
@@ -40,11 +51,14 @@ def run_sensitivity_analysis(
         X_test:       (N, F) float array of already-normalized features.
         y_test:       (N,) binary labels.
         device:       Torch device.
-        config_array: (N, 9) object array with columns
+        config_array: (N, 9|10) array with columns
                       [target_set_size, attacker_ratio, protocol, splits,
-                       epsilon, dataset_type, n, experiment_id, row_in_experiment].
+                       epsilon, dataset_type, n, experiment_id, row_in_experiment,
+                       (holdout)].
                       If None, per-parameter breakdown is skipped.
         batch_size:   Mini-batch size for inference.
+        oat_defaults: {epsilon, attacker_ratio, target_set_size, splits} ->
+                      default value, from a one-at-a-time design. 
     """
     model.eval()
     results = []
@@ -63,17 +77,24 @@ def run_sensitivity_analysis(
     global_preds = (global_probs > 0.5).astype(int)
     y_true_all   = y_test.astype(int)
 
+    def _row(param_type, label, value, mask, slice_name):
+        y_t, y_p = y_true_all[mask], global_preds[mask]
+        return {
+            'Parameter_Type':  param_type,
+            'Parameter_Label': label,
+            'Value':           value,
+            'Accuracy':  accuracy_score(y_t, y_p),
+            'Precision': precision_score(y_t, y_p, zero_division=0),
+            'Recall':    recall_score(y_t, y_p, zero_division=0),
+            'F1_Score':  f1_score(y_t, y_p, zero_division=0),
+            'Count':     int(mask.sum()),
+            'Attackers': int(y_t.sum()),
+            'Slice':     slice_name,
+        }
+
     # Overall metrics
-    results.append({
-        'Parameter_Type':  'overall',
-        'Parameter_Label': 'Overall',
-        'Value':           'all',
-        'Accuracy':  accuracy_score(y_true_all, global_preds),
-        'Precision': precision_score(y_true_all, global_preds, zero_division=0),
-        'Recall':    recall_score(y_true_all, global_preds, zero_division=0),
-        'F1_Score':  f1_score(y_true_all, global_preds, zero_division=0),
-        'Count':     len(y_true_all),
-    })
+    results.append(_row('overall', 'Overall', 'all',
+                        np.ones(len(y_true_all), dtype=bool), 'all'))
 
     if config_array is None:
         return pd.DataFrame(results)
@@ -92,28 +113,30 @@ def run_sensitivity_analysis(
         'n':               (_CONF_N,               PARAM_DISPLAY_MAP.get('n',               'Number of Users')),
     }
 
+    # Under a one-at-a-time design, a swept parameter is only meaningful on the
+    # rows where every other swept parameter sits at its default.
+    oat_rest_mask = {}
+    if oat_defaults:
+        numeric = {p: config_array[:, _COL_MAP[p][0]].astype(np.float64)
+                   for p in _OAT_PARAMS if p in oat_defaults}
+        for p in numeric:
+            rest = np.ones(len(y_true_all), dtype=bool)
+            for q, vals in numeric.items():
+                if q != p:
+                    rest &= np.isclose(vals, float(oat_defaults[q]))
+            oat_rest_mask[p] = rest
+
     for col_name, (col_idx, display_name) in _COL_MAP.items():
         col_vals = config_array[:, col_idx]
-        unique_vals = sorted(set(col_vals))
+        rest = oat_rest_mask.get(col_name)
+        slice_name = 'all' if rest is None else 'oat'
 
-        for val in unique_vals:
+        for val in _sort_values(set(col_vals if rest is None else col_vals[rest])):
             mask = col_vals == val
-            if not mask.any():
-                continue
-
-            y_t  = y_true_all[mask]
-            y_p  = global_preds[mask]
-
-            results.append({
-                'Parameter_Type':  col_name,
-                'Parameter_Label': display_name,
-                'Value':           val,
-                'Accuracy':  accuracy_score(y_t, y_p),
-                'Precision': precision_score(y_t, y_p, zero_division=0),
-                'Recall':    recall_score(y_t, y_p, zero_division=0),
-                'F1_Score':  f1_score(y_t, y_p, zero_division=0),
-                'Count':     int(mask.sum()),
-            })
+            if rest is not None:
+                mask &= rest
+            if mask.any():
+                results.append(_row(col_name, display_name, val, mask, slice_name))
 
     return pd.DataFrame(results)
 

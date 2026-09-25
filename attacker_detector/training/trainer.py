@@ -5,11 +5,46 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 from ..data import AttackerDataset
+
+
+class BalancedBatchSampler(Sampler):
+    """Batches of exactly half attackers, half benign, reshuffled every epoch.
+    """
+
+    def __init__(self, labels: np.ndarray, batch_size: int, seed: int = 42):
+        if batch_size < 2:
+            raise ValueError("balanced batches need batch_size >= 2")
+        y = np.asarray(labels).astype(int).ravel()
+        self.pos = np.where(y == 1)[0]
+        self.neg = np.where(y == 0)[0]
+        if len(self.pos) == 0 or len(self.neg) == 0:
+            raise ValueError("balanced batches need both classes in the training set")
+        self.half = batch_size // 2
+        self.rng = np.random.default_rng(seed)
+
+    def __len__(self) -> int:
+        return min(len(self.pos), len(self.neg)) // self.half
+
+    def __iter__(self):
+        pos = self.rng.permutation(self.pos)
+        neg = self.rng.permutation(self.neg)
+        for b in range(len(self)):
+            s = slice(b * self.half, (b + 1) * self.half)
+            batch = np.concatenate([pos[s], neg[s]])
+            self.rng.shuffle(batch)
+            yield batch.tolist()
+
+
+def _train_loader(dataset, y_train, batch_size, pin_memory, balanced_batches):
+    if balanced_batches:
+        return DataLoader(dataset, pin_memory=pin_memory,
+                          batch_sampler=BalancedBatchSampler(y_train, batch_size))
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=pin_memory)
 
 
 def _ft_transformer_param_groups(model: nn.Module, weight_decay: float):
@@ -189,10 +224,10 @@ class Trainer:
         batch_size: int = 256,
         patience: int = 10,
         verbose: bool = True,
+        balanced_batches: bool = False,
     ) -> dict:
         """
         Train with early stopping based on validation F1 score.
-
         Returns:
             Dict with 'best_epoch', 'best_val_f1', 'history' (list of per-epoch dicts).
         """
@@ -208,9 +243,11 @@ class Trainer:
 
         train_dataset = AttackerDataset(X_train, y_train)
         pin_memory = self.device.type == 'cuda'
-        train_loader = DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True, pin_memory=pin_memory,
-        )
+        train_loader = _train_loader(train_dataset, y_train, batch_size,
+                                     pin_memory, balanced_batches)
+        if verbose and balanced_batches:
+            print(f"Balanced batches: {batch_size // 2} attackers + "
+                  f"{batch_size // 2} benign per batch, {len(train_loader):,} batches/epoch")
 
         best_val_f1 = -1.0
         best_epoch = 0

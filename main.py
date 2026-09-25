@@ -23,6 +23,7 @@ from attacker_detector.data import (
     load_npy_dataset,
     prepare_npy_data,
     prepare_npy_data_by_dataset_type,
+    prepare_npy_data_oat,
 )
 from attacker_detector.training import Trainer
 from attacker_detector.training.trainer import run_k_fold_cv, run_hp_search_cv
@@ -301,7 +302,29 @@ def parse_args():
         type=int,
         default=None,
         help='Randomly subsample to at most this many rows (stratified by label), '
-             'applied after --protocol/--dataset filtering and before splitting'
+             'applied after --protocol/--dataset filtering and before splitting. '
+             'Ignored for one-at-a-time datasets (use --train-samples / --test-samples).'
+    )
+
+    oat = parser.add_argument_group(
+        'one-at-a-time datasets',
+        'Used when the dataset directory has a design.json with design "oat" '
+        '(generate_dataset.py --design oat). Train/val are drawn only from '
+        'training LDP runs and test only from held-out runs.'
+    )
+    oat.add_argument(
+        '--train-samples', type=int, default=500_000,
+        help='Train + val rows, 50/50 attacker/benign inside every config; '
+             '--val-size is carved out of this'
+    )
+    oat.add_argument(
+        '--test-samples', type=int, default=60_000,
+        help='Headline test rows from held-out runs, stratified by config, at '
+             'natural attacker prevalence. Sensitivity curves use every held-out row.'
+    )
+    parser.add_argument(
+        '--balanced-batches', action='store_true',
+        help='Every training batch is exactly half attackers, half benign'
     )
 
     args = parser.parse_args()
@@ -310,6 +333,10 @@ def parse_args():
         parser.error("--dataset only applies to --training-method none")
     if args.max_samples is not None and args.max_samples < 1:
         parser.error("--max-samples must be a positive integer")
+    if args.train_samples < 2 or args.test_samples < 1:
+        parser.error("--train-samples must be >= 2 and --test-samples >= 1")
+    if not 0.0 <= args.val_size < 1.0:
+        parser.error("--val-size must be in [0, 1)")
 
     if args.training_method in ('cross', 'three-way'):
         if not args.train_dataset or not args.test_dataset:
@@ -350,7 +377,13 @@ def main():
             f"No rows for protocol={args.protocol!r}, dataset={args.dataset!r}. "
             f"Available protocols: {sorted(set(ds.protocols))}"
         )
-    if args.max_samples and len(idx) > args.max_samples:
+    if ds.is_oat and args.max_samples:
+        # Subsampling here would drop held-out runs and unbalance the configs
+        # before prepare_npy_data_oat gets to them.
+        print(f"  [WARN] --max-samples ignored for a one-at-a-time dataset; "
+              f"sizes come from --train-samples {args.train_samples:,} and "
+              f"--test-samples {args.test_samples:,}")
+    elif args.max_samples and len(idx) > args.max_samples:
         idx, _ = train_test_split(
             idx,
             train_size=args.max_samples,
@@ -375,7 +408,28 @@ def main():
 
     use_val = args.val_size > 0
 
-    if args.training_method == 'none':
+    if ds.is_oat:
+        if args.training_method == 'three-way':
+            raise ValueError("--training-method three-way is not supported for "
+                             "one-at-a-time datasets")
+        train_mask = test_mask = None
+        if args.training_method == 'cross':
+            dt = ds.dataset_types
+            train_mask = np.isin(dt, args.train_dataset)
+            test_mask = dt == args.test_dataset
+        print(f"\nPreparing one-at-a-time data (defaults: {ds.design['defaults']})"
+              + (f", train={'+'.join(args.train_dataset)}, test={args.test_dataset}"
+                 if args.training_method == 'cross' else "") + "...")
+        split = prepare_npy_data_oat(
+            ds,
+            train_samples=args.train_samples,
+            test_samples=args.test_samples,
+            val_size=args.val_size,
+            random_state=args.seed,
+            train_mask=train_mask,
+            test_mask=test_mask,
+        )
+    elif args.training_method == 'none':
         print("\nPreparing data...")
         split = prepare_npy_data(
             ds,
@@ -573,9 +627,13 @@ def main():
             epochs=args.epochs,
             batch_size=args.batch_size,
             patience=args.patience,
+            balanced_batches=args.balanced_batches,
         )
 
     else:
+        if args.balanced_batches:
+            print("  [WARN] --balanced-batches needs a validation set (--val-size > 0); "
+                  "training with a plain shuffle")
         train_result = trainer.fit(X_train, y_train, epochs=args.epochs, batch_size=args.batch_size)
 
     if args.output_dir:
@@ -612,16 +670,21 @@ def main():
             test_metrics_df.to_csv(test_metrics_path, index=False)
             print(f"Test results saved to: {test_metrics_path}")
 
-        print("\nRunning Sensitivity Analysis on test set...")
-        test_config = ds.config[test_indices]
+        # One-at-a-time datasets: curves come from every held-out row (not just
+        # the headline test sample), sliced so each parameter varies alone.
+        oat_defaults = ds.design['defaults'] if ds.is_oat else None
+        sens_indices = split.get('sens_indices', test_indices)
 
+        print(f"\nRunning Sensitivity Analysis on {len(sens_indices):,} "
+              f"{'held-out' if ds.is_oat else 'test'} rows...")
         sensitivity_df = run_sensitivity_analysis(
             model,
-            X_test,
-            y_test,
+            ds.features[sens_indices],
+            ds.labels[sens_indices],
             device,
-            config_array=test_config,
+            config_array=ds.config[sens_indices],
             batch_size=4096,
+            oat_defaults=oat_defaults,
         )
 
         print("\nSensitivity Analysis Results:")
@@ -631,6 +694,21 @@ def main():
             results_path = os.path.join(args.output_dir, 'sensitivity_test_results.csv')
             sensitivity_df.to_csv(results_path, index=False)
             print(f"\nSensitivity test results saved to: {results_path}")
+
+        if 'sens_balanced_indices' in split:
+            bal = split['sens_balanced_indices']
+            print(f"\nRunning Sensitivity Analysis on the balanced held-out view "
+                  f"({len(bal):,} rows, 50/50 per config -- NOT comparable to "
+                  f"natural-prevalence results)...")
+            balanced_df = run_sensitivity_analysis(
+                model, ds.features[bal], ds.labels[bal], device,
+                config_array=ds.config[bal], batch_size=4096,
+                oat_defaults=oat_defaults,
+            )
+            if args.output_dir:
+                bal_path = os.path.join(args.output_dir, 'sensitivity_test_balanced.csv')
+                balanced_df.to_csv(bal_path, index=False)
+                print(f"Balanced sensitivity results saved to: {bal_path}")
 
         if not args.no_plot:
             _save_sensitivity_plots(sensitivity_df, 'test', args.output_dir)

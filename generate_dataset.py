@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import traceback
+import zlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -23,16 +24,124 @@ from config import (
 from attacker_detector.data.generators import (
     generate_perturbed_data,
     extract_user_level_features_diffstats_style,
-    compute_pi_hat,
     FEATURE_NAMES,
 )
 
+
+OLH_PROTOCOLS = {'OLH', 'OLH_User', 'OLH_Server'}
+
+
+def _resolve_protocol(protocol: str):
+    """protocol label -> (base protocol passed to the generator, OLH setting)."""
+    if protocol == "OLH_User":
+        return "OLH", "user"
+    if protocol == "OLH_Server":
+        return "OLH", "server"
+    return protocol, "server"
+
+
+def _make_task(args, *, epsilon, dataset_type, domain, n, protocol, ratio,
+               target_size, splits, exp_i, seed, holdout):
+    base_protocol, olh_setting = _resolve_protocol(protocol)
+    return {
+        'epsilon': epsilon,
+        'domain': domain,
+        'n': n,
+        'protocol': base_protocol,
+        'protocol_label': protocol,
+        'ratio': ratio,
+        'target_set_size': target_size,
+        'splits': splits,
+        'dataset_type': dataset_type,
+        'h_ao': 1,
+        'seed': seed,
+        'inner_processors': args.inner_processors,  # not nested so use multi core
+        'olh_setting': olh_setting,
+        'exp_i': exp_i,
+        'holdout': holdout,
+        'desc': (
+            f"ε={epsilon}, {dataset_type}, {protocol}, "
+            f"ratio={ratio}, target={target_size}, "
+            f"splits={splits}, exp={exp_i + 1}"
+            + (", holdout" if holdout else "")
+        ),
+    }
+
+
+def oat_configs(args) -> list:
+    """(epsilon, ratio, target_size, splits) points of a one-at-a-time design.
+    """
+    d = (args.default_epsilon, args.default_ratio,
+         args.default_target_size, args.default_splits)
+    points, seen = [], set()
+
+    def add(point):
+        key = (round(float(point[0]), 9), round(float(point[1]), 9),
+               int(point[2]), int(point[3]))
+        if key in seen:
+            return
+        if key[3] > key[2]:
+            print(f"  [WARN] skipping OAT point {key}: splits > target_set_size")
+            return
+        seen.add(key)
+        points.append(key)
+
+    for eps in args.epsilons:
+        add((eps, d[1], d[2], d[3]))
+    for ratio in args.ratios:
+        add((d[0], ratio, d[2], d[3]))
+    for target in args.target_sizes:
+        add((d[0], d[1], target, d[3]))
+    for splits in args.splits:
+        add((d[0], d[1], d[2], splits))
+
+    center = (round(float(d[0]), 9), round(float(d[1]), 9), int(d[2]), int(d[3]))
+    if center not in seen:
+        print(f"  [WARN] the default point {center} is not in any sweep list, so the "
+              f"sweeps share no common point. Add each default to its own list.")
+    return points
+
+
+def oat_replicates(args, ratio: float, n: int) -> int:
+    """Training replicates for one OAT config.
+    attackers: ceil(A / (ratio * n)).
+    """
+    if args.balance_attackers:
+        return max(1, math.ceil(args.balance_attackers / (ratio * n)))
+    return args.experiments
+
+
+def _oat_seed(base: int, dataset_type, protocol, epsilon, ratio, target, splits, rep) -> int:
+    key = f"{dataset_type}|{protocol}|{epsilon!r}|{ratio!r}|{target}|{splits}|{rep}"
+    return (base + zlib.crc32(key.encode())) % (2 ** 32 - 1)
 
 
 def build_tasks(args) -> list:
     """Build list of task dicts for all experiment configurations."""
     configs = DATASET_CONFIGS_FULL if args.full_scale else DATASET_CONFIGS
     tasks = []
+
+    if args.design == 'oat':
+        points = oat_configs(args)
+        for dataset_type in args.datasets:
+            dataset_config = configs[dataset_type]
+            domain = args.domain if args.domain else dataset_config['domain']
+            n = args.n if args.n else dataset_config['n']
+
+            for protocol in args.protocols:
+                for epsilon, ratio, target_size, splits in points:
+                    n_train = oat_replicates(args, ratio, n)
+                    for exp_i in range(n_train + args.holdout_replicates):
+                        tasks.append(_make_task(
+                            args,
+                            epsilon=epsilon, dataset_type=dataset_type,
+                            domain=domain, n=n, protocol=protocol, ratio=ratio,
+                            target_size=target_size, splits=splits, exp_i=exp_i,
+                            seed=_oat_seed(args.seed, dataset_type, protocol,
+                                           epsilon, ratio, target_size, splits, exp_i),
+                            holdout=int(exp_i >= n_train),
+                        ))
+        return tasks
 
     for epsilon in args.epsilons:
         for dataset_type in args.datasets:
@@ -47,41 +156,16 @@ def build_tasks(args) -> list:
                             if splits > target_size:
                                 continue
                             for exp_i in range(args.experiments):
-                                # Determine OLH setting
-                                if protocol == "OLH_User":
-                                    base_protocol = "OLH"
-                                    olh_setting = "user"
-                                elif protocol == "OLH_Server":
-                                    base_protocol = "OLH"
-                                    olh_setting = "server"
-                                else:
-                                    base_protocol = protocol
-                                    olh_setting = "server"
-
                                 config_idx = len(tasks) + 1
-                                seed = args.seed + config_idx * 1000 + exp_i
-
-                                tasks.append({
-                                    'epsilon': epsilon,
-                                    'domain': domain,
-                                    'n': n,
-                                    'protocol': base_protocol,
-                                    'protocol_label': protocol,
-                                    'ratio': ratio,
-                                    'target_set_size': target_size,
-                                    'splits': splits,
-                                    'dataset_type': dataset_type,
-                                    'h_ao': 1,
-                                    'seed': seed,
-                                    'inner_processors': args.inner_processors, # not nested so use multi core
-                                    'olh_setting': olh_setting,
-                                    'exp_i': exp_i,
-                                    'desc': (
-                                        f"ε={epsilon}, {dataset_type}, {protocol}, "
-                                        f"ratio={ratio}, target={target_size}, "
-                                        f"splits={splits}, exp={exp_i + 1}"
-                                    ),
-                                })
+                                tasks.append(_make_task(
+                                    args,
+                                    epsilon=epsilon, dataset_type=dataset_type,
+                                    domain=domain, n=n, protocol=protocol,
+                                    ratio=ratio, target_size=target_size,
+                                    splits=splits, exp_i=exp_i,
+                                    seed=args.seed + config_idx * 1000 + exp_i,
+                                    holdout=0,
+                                ))
 
     return tasks
 
@@ -92,10 +176,10 @@ def run_one_task(task: dict) -> dict:
     Execute one experiment configuration:
       1. Generate perturbed data via generate_perturbed_data()
       2. Extract features
-      3. Return result dict with features, labels, and metadata
+      3. Return result dict with features, labels and the per-row config summary
     """
     try:
-        support_list, labels, real_dist, estimate_dist, one_list = generate_perturbed_data(
+        support_list, labels, _real_dist, _estimate_dist, one_list = generate_perturbed_data(
             epsilon=task['epsilon'],
             domain=task['domain'],
             n=task['n'],
@@ -119,10 +203,6 @@ def run_one_task(task: dict) -> dict:
             n=task['n'],
         )
 
-        pi_hat, p_param, q_param = compute_pi_hat(
-            support_list, task['protocol_label'], task['epsilon'], task['domain']
-        )
-
         # experiment_id is appended by _handle_result (main process), which is
         # the only place the final sequential index across all tasks is known.
         config_summary = [
@@ -130,28 +210,12 @@ def run_one_task(task: dict) -> dict:
             task['splits'], task['epsilon'], task['dataset_type'], task['n'],
         ]
 
-        p_label = task['protocol_label']
-        if p_label.startswith('HST'):
-            support_tensor_cast = support_list.astype(np.float32)
-        else:
-            support_tensor_cast = support_list.astype(np.uint8)
-
-        graph_meta = {
-            'pi_hat': pi_hat.astype(np.float32),
-            'pi_true': real_dist.astype(np.float32),
-            'p': p_param,
-            'q': q_param,
-            'epsilon': task['epsilon'],
-            'protocol': p_label,
-            'support_tensor': support_tensor_cast,
-        }
-
         return {
             'ok': True,
             'features': features,
             'labels': labels,
             'config_summary': config_summary,
-            'graph_meta': graph_meta,
+            'holdout': task['holdout'],
             'num_users': len(labels),
             'num_attackers': int(labels.sum()),
             'desc': task['desc'],
@@ -166,28 +230,52 @@ def run_one_task(task: dict) -> dict:
         }
 
 
-def append_metadata_to_zip(metadata_path, all_metadata, start_idx):
-    import io
-    import zipfile
-    with zipfile.ZipFile(metadata_path, mode='a', compression=zipfile.ZIP_DEFLATED) as zipf:
-        for idx, gm in enumerate(all_metadata):
-            g_idx = start_idx + idx
-            for key, val in gm.items():
-                buf = io.BytesIO()
-                np.save(buf, val)
-                zipf.writestr(f"graph_{g_idx:06d}_{key}.npy", buf.getvalue())
+def write_design(args, tasks: list, output_dir: str) -> None:
+    runs = {}
+    for t in tasks:
+        key = (t['dataset_type'], t['protocol_label'], t['epsilon'], t['ratio'],
+               t['target_set_size'], t['splits'])
+        entry = runs.setdefault(key, {'train': 0, 'holdout': 0})
+        entry['holdout' if t['holdout'] else 'train'] += 1
+
+    design = {
+        'design': args.design,
+        'protocols': list(args.protocols),
+        'datasets': list(args.datasets),
+        'n': args.n,
+        'sweeps': {
+            'epsilon': [float(v) for v in args.epsilons],
+            'attacker_ratio': [float(v) for v in args.ratios],
+            'target_set_size': [int(v) for v in args.target_sizes],
+            'splits': [int(v) for v in args.splits],
+        },
+        'runs': [
+            {'dataset_type': k[0], 'protocol': k[1], 'epsilon': k[2],
+             'attacker_ratio': k[3], 'target_set_size': k[4], 'splits': k[5], **v}
+            for k, v in runs.items()
+        ],
+    }
+    if args.design == 'oat':
+        design['defaults'] = {
+            'epsilon': float(args.default_epsilon),
+            'attacker_ratio': float(args.default_ratio),
+            'target_set_size': int(args.default_target_size),
+            'splits': int(args.default_splits),
+        }
+        design['balance_attackers'] = args.balance_attackers
+        design['holdout_replicates'] = args.holdout_replicates
+
+    with open(os.path.join(output_dir, 'design.json'), 'w') as f:
+        json.dump(design, f, indent=2)
 
 
 def flush_to_disk(
     all_features,
     all_labels,
     all_configs,
-    all_metadata,
     features_bin_path,
     labels_bin_path,
     config_bin_path,
-    metadata_path,
-    start_graph_idx,
 ):
     if not all_features:
         return
@@ -202,14 +290,15 @@ def flush_to_disk(
 
     # Expand per-experiment config to per-user rows and flush. row_in_experiment
     # (0..n_users-1) is the one column that varies within an experiment, so it's
-    # appended per-row rather than tiled like the rest of cfg_sum.
     tiled = []
-    for cfg_sum, n_users in all_configs:
-        tiled_rows = np.tile(cfg_sum, (n_users, 1))
-        row_in_experiment = np.arange(n_users).reshape(-1, 1)
-        tiled.append(np.hstack([tiled_rows, row_in_experiment]))
-    batch_config = np.vstack(tiled)  # object array — use pickle/npy format
-    buf = batch_config.tobytes()  # won't work for object — use np.save
+    for cfg_sum, n_users, holdout in all_configs:
+        tiled_rows = np.tile(np.array([str(v) for v in cfg_sum]), (n_users, 1))
+        # astype(str) on ints is always U21; size it to the largest index instead
+        row_in_experiment = np.arange(n_users).astype(
+            f'<U{len(str(max(n_users - 1, 0)))}').reshape(-1, 1)
+        holdout_col = np.full((n_users, 1), str(int(holdout)))
+        tiled.append(np.hstack([tiled_rows, row_in_experiment, holdout_col]))
+    batch_config = np.vstack(tiled)
     import io
     buf = io.BytesIO()
     np.save(buf, batch_config)
@@ -218,13 +307,10 @@ def flush_to_disk(
         c_bin.write(length.to_bytes(8, 'little'))  # prefix with chunk length
         c_bin.write(buf.getvalue())
 
-    append_metadata_to_zip(metadata_path, all_metadata, start_graph_idx)
-
     n_saved = len(batch_labels)
     all_features.clear()
     all_labels.clear()
     all_configs.clear()
-    all_metadata.clear()
     del batch_features, batch_labels
 
     print(f"  [FLUSHED] {n_saved} users to temp binary files")
@@ -347,7 +433,44 @@ def parse_args():
         help='Flush accumulated results to disk every N completed tasks'
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        '--olh-parallel',
+        action='store_true',
+        help='Run OLH tasks in the outer process pool with --inner-processors 1'
+    )
+
+    oat = parser.add_argument_group(
+        'one-at-a-time design',
+        'With --design oat, each of --epsilons / --ratios / --target-sizes / '
+        '--splits is swept on its own while the other parameters sit at their '
+        '--default-* values, instead of taking the full cross product.'
+    )
+    oat.add_argument('--design', choices=['grid', 'oat'], default='grid',
+                     help='grid = full cross product (original behaviour); '
+                          'oat = one-at-a-time sweeps around the defaults')
+    oat.add_argument('--default-epsilon', type=float, default=1.0)
+    oat.add_argument('--default-ratio', type=float, default=0.05)
+    oat.add_argument('--default-target-size', type=int, default=10)
+    oat.add_argument('--default-splits', type=int, default=4)
+    oat.add_argument(
+        '--balance-attackers', type=int, default=None,
+        help='Training replicates per config = ceil(A / (ratio * n)), so every '
+             'config supplies at least A attackers. Overrides --experiments.'
+    )
+    oat.add_argument(
+        '--holdout-replicates', type=int, default=0,
+        help='Extra replicates per config marked holdout=1 (config column 9); '
+             'main.py never trains on them'
+    )
+
+    args = parser.parse_args()
+    if args.design == 'grid' and (args.balance_attackers or args.holdout_replicates):
+        parser.error('--balance-attackers / --holdout-replicates require --design oat')
+    if args.balance_attackers is not None and args.balance_attackers < 1:
+        parser.error('--balance-attackers must be a positive integer')
+    if args.holdout_replicates < 0:
+        parser.error('--holdout-replicates must be >= 0')
+    return args
 
 
 
@@ -360,12 +483,17 @@ def main():
 
     tasks = build_tasks(args)
 
-    # Separate OLH tasks (sequential) from non-OLH tasks (parallel)
-    olh_protocols = {'OLH', 'OLH_User', 'OLH_Server'}
-    parallel_tasks = [t for t in tasks if t['protocol_label'] not in olh_protocols]
-    sequential_tasks = [t for t in tasks if t['protocol_label'] in olh_protocols]
+    if args.olh_parallel:
+        for t in tasks:
+            if t['protocol_label'] in OLH_PROTOCOLS:
+                t['inner_processors'] = 1
+        parallel_tasks, sequential_tasks = tasks, []
+    else:
+        parallel_tasks = [t for t in tasks if t['protocol_label'] not in OLH_PROTOCOLS]
+        sequential_tasks = [t for t in tasks if t['protocol_label'] in OLH_PROTOCOLS]
 
     total_runs = len(tasks)
+    write_design(args, tasks, output_dir)
 
     print("=" * 80)
     print("LDP Attack Detection Dataset Generator")
@@ -377,10 +505,20 @@ def main():
     print(f"Ratios: {args.ratios}")
     print(f"Target sizes: {args.target_sizes}")
     print(f"Splits: {args.splits}")
-    print(f"Experiments per config: {args.experiments}")
+    print(f"Design: {args.design}")
+    if args.design == 'oat':
+        print(f"  Defaults: eps={args.default_epsilon}, ratio={args.default_ratio}, "
+              f"target={args.default_target_size}, splits={args.default_splits}")
+        print(f"  Configs per (dataset, protocol): {len(oat_configs(args))}")
+        print(f"  Balance attackers: {args.balance_attackers or 'off'}  "
+              f"Holdout replicates: {args.holdout_replicates}")
+        n_hold = sum(t['holdout'] for t in tasks)
+        print(f"  Train runs: {total_runs - n_hold}  Holdout runs: {n_hold}")
+    else:
+        print(f"Experiments per config: {args.experiments}")
     print(f"Total experiment runs: {total_runs}")
-    print(f"  Parallel tasks (OUE/HST): {len(parallel_tasks)}")
-    print(f"  Sequential tasks (OLH):   {len(sequential_tasks)}")
+    print(f"  Parallel tasks:   {len(parallel_tasks)}")
+    print(f"  Sequential tasks: {len(sequential_tasks)}")
     print(f"Outer workers: {args.workers}")
     print(f"Inner processors per task: {args.inner_processors}")
     print(f"Feature count: {len(FEATURE_NAMES)}")
@@ -391,7 +529,6 @@ def main():
     all_features = []
     all_labels = []
     all_configs = []
-    all_metadata = []
     total_users = 0
     total_attackers = 0
     num_success = 0
@@ -402,13 +539,12 @@ def main():
     features_path = os.path.join(output_dir, 'features.npy')
     labels_path = os.path.join(output_dir, 'labels.npy')
     config_path = os.path.join(output_dir, 'config.npy')
-    metadata_path = os.path.join(output_dir, 'metadata.npz')
+    stale_metadata_path = os.path.join(output_dir, 'metadata.npz')
 
-    # Clear any previous partial output
     features_bin_path = os.path.join(output_dir, 'features.bin')
     labels_bin_path = os.path.join(output_dir, 'labels.bin')
     config_bin_path = os.path.join(output_dir, 'config.bin')
-    for p_clear in [features_path, labels_path, config_path, metadata_path,
+    for p_clear in [features_path, labels_path, config_path, stale_metadata_path,
                     features_bin_path, labels_bin_path, config_bin_path]:
         if os.path.exists(p_clear):
             os.remove(p_clear)
@@ -417,30 +553,18 @@ def main():
         nonlocal total_users, total_attackers, num_success, num_failed, graph_index
 
         if result['ok']:
-            # experiment_id matches the graph_{idx:06d}_* keys metadata.npz gets
-            # written under below — this is the only place the final sequential
-            # index across all (possibly out-of-order-completing) tasks is known.
+            # experiment_id is assigned here, in the main process, because this
+            # is the only place the final sequential index across all (possibly
+            # out-of-order-completing) tasks is known.
             experiment_id = graph_index
             config_summary = list(result['config_summary']) + [experiment_id]
 
             all_features.append(result['features'])
             all_labels.append(result['labels'])
-            all_configs.append((config_summary, result['num_users']))
+            all_configs.append((config_summary, result['num_users'], result['holdout']))
             total_users += result['num_users']
             total_attackers += result['num_attackers']
             num_success += 1
-
-            # Save per-experiment metadata
-            gm = result['graph_meta']
-            all_metadata.append({
-                'pi_hat': gm['pi_hat'],
-                'pi_true': gm['pi_true'],
-                'p': np.float64(gm['p']),
-                'q': np.float64(gm['q']),
-                'epsilon': np.float64(gm['epsilon']),
-                'protocol': str(gm['protocol']),
-                'support_tensor': gm['support_tensor'],
-            })
             graph_index += 1
 
             print(
@@ -482,16 +606,14 @@ def main():
 
                     if len(all_features) >= SAVE_EVERY:
                         flush_to_disk(
-                            all_features, all_labels, all_configs, all_metadata,
-                            features_bin_path, labels_bin_path, config_bin_path, metadata_path,
-                            graph_index - len(all_metadata)
+                            all_features, all_labels, all_configs,
+                            features_bin_path, labels_bin_path, config_bin_path,
                         )
 
             if all_features:
                 flush_to_disk(
-                    all_features, all_labels, all_configs, all_metadata,
-                    features_bin_path, labels_bin_path, config_bin_path, metadata_path,
-                    graph_index - len(all_metadata)
+                    all_features, all_labels, all_configs,
+                    features_bin_path, labels_bin_path, config_bin_path,
                 )
 
     if sequential_tasks:
@@ -502,16 +624,14 @@ def main():
 
             if len(all_features) >= SAVE_EVERY:
                 flush_to_disk(
-                    all_features, all_labels, all_configs, all_metadata,
-                    features_bin_path, labels_bin_path, config_bin_path, metadata_path,
-                    graph_index - len(all_metadata)
+                    all_features, all_labels, all_configs,
+                    features_bin_path, labels_bin_path, config_bin_path,
                 )
 
     if all_features:
         flush_to_disk(
-            all_features, all_labels, all_configs, all_metadata,
-            features_bin_path, labels_bin_path, config_bin_path, metadata_path,
-            graph_index - len(all_metadata)
+            all_features, all_labels, all_configs,
+            features_bin_path, labels_bin_path, config_bin_path,
         )
 
     # Reconstruct features, labels, and configs
@@ -591,7 +711,7 @@ def main():
         print(f"Attackers: {total_attackers:,} ({100.0 * total_attackers / total_users:.2f}%)")
 
     print(f"\nOutput directory: {output_dir}")
-    for fname in ['features.npy', 'labels.npy', 'config.npy', 'norm_stats.json', 'metadata.npz']:
+    for fname in ['features.npy', 'labels.npy', 'config.npy', 'norm_stats.json', 'design.json']:
         fpath = os.path.join(output_dir, fname)
         if os.path.exists(fpath):
             size_mb = os.path.getsize(fpath) / (1024 * 1024)

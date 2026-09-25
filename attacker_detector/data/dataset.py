@@ -68,6 +68,7 @@ _CONF_DATASET_TYPE       = 5
 _CONF_N                  = 6
 _CONF_EXPERIMENT_ID      = 7
 _CONF_ROW_IN_EXPERIMENT  = 8
+_CONF_HOLDOUT            = 9   # 1 = held-out LDP run, never trained on (absent in older datasets)
 
 
 class NpyDataset:
@@ -78,12 +79,18 @@ class NpyDataset:
         config: np.ndarray,
         feature_names: List[str],
         norm_stats: Optional[dict] = None,
+        design: Optional[dict] = None,
     ):
         self.features = features          # (N, F) float32, already normalized
         self.labels = labels              # (N,) float32
-        self.config = config              # (N, 9) object
+        self.config = config              # (N, 9) or (N, 10) str
         self.feature_names = feature_names
         self.norm_stats = norm_stats
+        self.design = design              # contents of design.json, if present
+
+    @property
+    def is_oat(self) -> bool:
+        return bool(self.design) and self.design.get('design') == 'oat'
 
     def __len__(self):
         return len(self.labels)
@@ -124,13 +131,20 @@ class NpyDataset:
     def rows_in_experiment(self) -> np.ndarray:
         return self.config[:, _CONF_ROW_IN_EXPERIMENT].astype(np.int64)
 
+    @property
+    def holdout(self) -> np.ndarray:
+        """1 for rows from held-out LDP runs; all zeros for older datasets."""
+        if self.config.shape[1] <= _CONF_HOLDOUT:
+            return np.zeros(len(self), dtype=np.int8)
+        return self.config[:, _CONF_HOLDOUT].astype(np.int8)
+
 
 def load_npy_dataset(data_dir: str) -> NpyDataset:
     features_path = os.path.join(data_dir, 'features.npy')
     labels_path   = os.path.join(data_dir, 'labels.npy')
     config_path   = os.path.join(data_dir, 'config.npy')
-    metadata_path = os.path.join(data_dir, 'metadata.npz')
     norm_path     = os.path.join(data_dir, 'norm_stats.json')
+    design_path   = os.path.join(data_dir, 'design.json')
 
     for p in [features_path, labels_path]:
         if not os.path.exists(p):
@@ -141,19 +155,24 @@ def load_npy_dataset(data_dir: str) -> NpyDataset:
     n_users  = len(labels)
 
     if os.path.exists(config_path):
-        config = np.load(config_path, allow_pickle=True)      # object array (N, 9)
+        config = np.load(config_path, allow_pickle=True)      # str array (N, 9) or (N, 10)
     else:
         print(
             "  [WARN] config.npy not found in dataset directory. "
             "Sensitivity analysis by epsilon/ratio/dataset_type will be unavailable. "
             "Re-run generate_dataset.py to produce a complete dataset with config.npy."
         )
-        config = np.empty((n_users, 9), dtype=object)
+        config = np.empty((n_users, 10), dtype=object)
 
     norm_stats = None
     if os.path.exists(norm_path):
         with open(norm_path) as f:
             norm_stats = json.load(f)
+
+    design = None
+    if os.path.exists(design_path):
+        with open(design_path) as f:
+            design = json.load(f)
 
     feature_names = (
         norm_stats['feature_names']
@@ -161,11 +180,12 @@ def load_npy_dataset(data_dir: str) -> NpyDataset:
         else [f'feat_{i}' for i in range(features.shape[1])]
     )
 
-    print(  
+    print(
         f"Loaded NPY dataset from '{data_dir}': "
         f"{n_users:,} samples, {features.shape[1]} features"
+        + (f", design={design.get('design')}" if design else "")
     )
-    return NpyDataset(features, labels, config, feature_names, norm_stats)
+    return NpyDataset(features, labels, config, feature_names, norm_stats, design)
 
 
 
@@ -221,6 +241,116 @@ def prepare_npy_data(
         print(f"Train: {len(X_trainval):,}  Test: {len(X_test):,}")
 
     return result
+
+
+def _config_groups(ds: NpyDataset, idx: np.ndarray) -> np.ndarray:
+    """Integer id per row identifying its experiment config: one sweep point on
+    one dataset under one protocol. Replicates of the same config share an id."""
+    c = ds.config[idx]
+    cols = [_CONF_DATASET_TYPE, _CONF_PROTOCOL, _CONF_EPSILON,
+            _CONF_ATTACKER_RATIO, _CONF_TARGET_SET_SIZE, _CONF_SPLITS]
+    frame = pd.DataFrame({k: c[:, k] for k in cols})
+    return frame.groupby(cols, sort=True).ngroup().to_numpy()
+
+
+def _balanced_per_group(idx, groups, y, per_class, rng):
+    """Up to `per_class` positives and as many negatives from every group.
+    Each group is kept 50/50
+    """
+    chosen, short = [], 0
+    for g in np.unique(groups):
+        in_g = groups == g
+        pos = idx[in_g & (y == 1)]
+        neg = idx[in_g & (y == 0)]
+        k = min(per_class, len(pos), len(neg))
+        if k < per_class:
+            short += 1
+        chosen.append(rng.choice(pos, size=k, replace=False))
+        chosen.append(rng.choice(neg, size=k, replace=False))
+    return np.concatenate(chosen), short
+
+
+def prepare_npy_data_oat(
+    ds: NpyDataset,
+    train_samples: int,
+    test_samples: int,
+    val_size: float = 0.1,
+    random_state: int = 42,
+    train_mask: Optional[np.ndarray] = None,
+    test_mask: Optional[np.ndarray] = None,
+) -> Dict:
+    """Split a one-at-a-time dataset by held-out LDP run, balancing training.
+    """
+    rng = np.random.default_rng(random_state)
+    y = ds.labels.astype(int)
+    hold = ds.holdout
+    n = len(ds)
+    train_mask = np.ones(n, bool) if train_mask is None else train_mask
+    test_mask = np.ones(n, bool) if test_mask is None else test_mask
+
+    pool = np.where((hold == 0) & train_mask)[0]
+    held = np.where((hold == 1) & test_mask)[0]
+    if len(pool) == 0:
+        raise ValueError("No holdout==0 rows to train on.")
+    if len(held) == 0:
+        raise ValueError(
+            "No holdout==1 rows to test on. Generate with --design oat "
+            "--holdout-replicates 1 (or more)."
+        )
+
+    # --- balanced train + val -------------------------------------------------
+    pool_groups = _config_groups(ds, pool)
+    n_groups = len(np.unique(pool_groups))
+    per_class = max(1, train_samples // (2 * n_groups))
+    tv_idx, short = _balanced_per_group(pool, pool_groups, y[pool], per_class, rng)
+    if short:
+        print(f"  [WARN] {short}/{n_groups} configs had fewer than {per_class:,} rows of "
+              f"one class; those configs were cut to their smaller class to stay 50/50. "
+              f"Train+val is {len(tv_idx):,} rows instead of ~{train_samples:,}.")
+
+    tv_groups = _config_groups(ds, tv_idx)
+    tr_idx, va_idx = train_test_split(
+        tv_idx, test_size=val_size, random_state=random_state,
+        stratify=tv_groups * 2 + y[tv_idx],
+    )
+
+    held_groups = _config_groups(ds, held)
+    held_strata = held_groups * 2 + y[held]
+    if test_samples >= len(held):
+        test_idx = held
+    else:
+        test_idx, _ = train_test_split(
+            held, train_size=test_samples, random_state=random_state,
+            stratify=held_strata,
+        )
+
+    per_class_held = int(np.bincount(held_strata).max())  # keep every attacker
+    sens_bal, _ = _balanced_per_group(held, held_groups, y[held], per_class_held, rng)
+
+    def _take(ix):
+        return ds.features[ix], ds.labels[ix]
+
+    X_train, y_train = _take(tr_idx)
+    X_val, y_val = _take(va_idx)
+    X_test, y_test = _take(test_idx)
+    X_tv, y_tv = _take(tv_idx)
+
+    print(f"Train: {len(tr_idx):,}  Val: {len(va_idx):,}  "
+          f"({per_class:,}/class x {n_groups} configs, 50/50)  "
+          f"Test: {len(test_idx):,} held-out rows at natural prevalence "
+          f"({100 * y_test.mean():.2f}% attackers)")
+    print(f"Sensitivity: {len(held):,} held-out rows "
+          f"(balanced view: {len(sens_bal):,})")
+
+    return {
+        'X_train': X_train, 'y_train': y_train, 'train_indices': tr_idx,
+        'X_val': X_val, 'y_val': y_val, 'val_indices': va_idx,
+        'X_trainval': X_tv, 'y_trainval': y_tv, 'trainval_indices': tv_idx,
+        'X_test': X_test, 'y_test': y_test, 'test_indices': test_idx,
+        'sens_indices': held,
+        'sens_balanced_indices': np.sort(sens_bal),
+        'scaler': None,
+    }
 
 
 def prepare_npy_data_by_dataset_type(
