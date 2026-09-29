@@ -24,7 +24,16 @@ def finalize(data_dir: str):
     if not os.path.exists(labels_bin_path) or not os.path.exists(features_bin_path):
         raise FileNotFoundError(f"features.bin / labels.bin not found in {data_dir}")
 
-    n_features = len(FEATURE_NAMES)
+    # generate_dataset.py writes design.json before any task runs, recording the
+    # feature set -- so even an interrupted run says how wide its rows are.
+    # Older directories have no design.json and are always the v1 features.
+    feature_names = FEATURE_NAMES
+    design_path = os.path.join(data_dir, 'design.json')
+    if os.path.exists(design_path):
+        with open(design_path) as f:
+            feature_names = json.load(f).get('feature_names', FEATURE_NAMES)
+    print(f"Feature set: {len(feature_names)} features")
+    n_features = len(feature_names)
 
     # --- labels ---
     labels_all = np.fromfile(labels_bin_path, dtype=np.float32)
@@ -60,11 +69,11 @@ def finalize(data_dir: str):
     np.save(labels_path, labels_all)
 
     norm_stats = {
-        'feature_names': FEATURE_NAMES,
+        'feature_names': feature_names,
         'mean': feat_mean.tolist(),
         'std': feat_std.tolist(),
         'near_zero_variance_columns': [
-            FEATURE_NAMES[i] for i in range(n_features) if near_zero[i]
+            feature_names[i] for i in range(n_features) if near_zero[i]
         ],
     }
     with open(norm_path, 'w') as f:

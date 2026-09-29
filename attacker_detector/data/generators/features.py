@@ -32,6 +32,33 @@ FEATURE_NAMES = [
     'js_divergence_k',
 ]
 
+# v2 drops the four k-features that are fixed functions of the user's
+# standardized k-deviation -- given num_ones_scaled and one_deviation they add
+# nothing -- and adds two target-block features (see _target_block_features).
+# The k-features built from the run's *observed* k-histogram are kept: unlike
+# the analytic ones they carry run-level context.
+_V2_DROPPED = {
+    'k_theoretical_frequency_scaled',
+    'log_likelihood',
+    'wasserstein_distance_scaled',
+    'js_divergence_k',
+}
+FEATURE_NAMES_V2 = [f for f in FEATURE_NAMES if f not in _V2_DROPPED] + [
+    'block_projection',
+    'block_overlap',
+]
+
+FEATURE_SETS = {'v1': FEATURE_NAMES, 'v2': FEATURE_NAMES_V2}
+DEFAULT_BLOCK_CANDIDATES = 32
+
+
+def feature_names_for(feature_set: str) -> list:
+    if feature_set not in FEATURE_SETS:
+        raise ValueError(f"Unknown feature set {feature_set!r}; "
+                         f"expected one of {sorted(FEATURE_SETS)}")
+    return FEATURE_SETS[feature_set]
+
+
 ANOMALY_THRESHOLD = 1.5
 # Fraction of distinct k-values flagged as discrepant. A fixed *count* would flag
 # a shrinking share as the domain grows, since the number of distinct k scales
@@ -143,6 +170,60 @@ def _k_lookup_table(one_list: np.ndarray, domain: int, p_binomial: float):
     return table, inverse, sigma_k
 
 
+def _target_block_features(reported_f: np.ndarray, p_binomial: float, n_candidates: int):
+    """Per-user score against the run's most coordinated block of items.
+
+    Every attacker in a run promotes a subset of the same target set, so the
+    targets are reported together far more often than chance. Benign users do
+    not create such a block: each holds a single true item, so even genuinely
+    popular items co-occur only at their marginal-product rate.
+
+      1. z-score each item's report count against the analytic binomial null;
+      2. keep the top n_candidates items with z > 0 -- the targets plus any
+         genuinely popular items;
+      3. take the leading eigenvector v of the candidates' off-diagonal
+         covariance, which concentrates on the jointly-reported block;
+      4. score each user against that block.
+
+    Uses only the reports and public protocol parameters, never labels or the
+    true item distribution.
+
+    Returns (block_projection, block_overlap), both dimensionless:
+      block_projection  the user's centered candidate reports projected onto v,
+                        divided by that projection's std within the run
+      block_overlap     share of the block's positive loading mass the user reports
+    """
+    n = reported_f.shape[0]
+    zeros = np.zeros(n, dtype=np.float64)
+
+    counts = reported_f.sum(axis=0)
+    null_sd = math.sqrt(max(n * p_binomial * (1.0 - p_binomial), 1e-12))
+    z = (counts - n * p_binomial) / null_sd
+
+    order = np.argsort(-z)[:n_candidates]
+    cand = order[z[order] > 0]
+    if len(cand) < 2:
+        return zeros, zeros
+
+    Xs = reported_f[:, cand]
+    Xc = Xs - Xs.mean(axis=0)
+    cov = Xc.T @ Xc / n
+    np.fill_diagonal(cov, 0.0)  # variance says nothing about co-occurrence
+    _, vecs = np.linalg.eigh(cov)
+    v = vecs[:, -1]
+    if v.sum() < 0:
+        v = -v
+
+    proj = Xc @ v
+    proj_sd = proj.std()
+    block_projection = proj / proj_sd if proj_sd > 1e-12 else zeros
+
+    v_pos = np.clip(v, 0.0, None)
+    mass = v_pos.sum()
+    block_overlap = Xs @ v_pos / mass if mass > 1e-12 else zeros
+    return block_projection, block_overlap
+
+
 def extract_user_level_features_diffstats_style(
     support_list: np.ndarray,
     one_list: np.ndarray,
@@ -150,6 +231,8 @@ def extract_user_level_features_diffstats_style(
     protocol: str,
     domain: int,
     n: int,
+    feature_set: str = 'v1',
+    block_candidates: int = DEFAULT_BLOCK_CANDIDATES,
 ) -> np.ndarray:
     """
     Extract features following DiffStats methodology.
@@ -171,10 +254,15 @@ def extract_user_level_features_diffstats_style(
         protocol: Protocol label, e.g. 'OUE', 'OLH_Server', 'HST_User'
         domain: Domain size
         n: Number of users
+        feature_set: 'v1' (16 columns, FEATURE_NAMES) or 'v2' (14 columns,
+            FEATURE_NAMES_V2)
+        block_candidates: candidate items for the v2 target-block features
 
     Returns:
-        Feature matrix (n, 16) ordered as FEATURE_NAMES.
+        Feature matrix (n, len(feature_names_for(feature_set))), columns in
+        that order.
     """
+    names = feature_names_for(feature_set)
     _, _, expected_ones = _protocol_params(protocol, epsilon, domain)
     _, _, _, p_binomial = _protocol_pq(protocol, epsilon, domain)
 
@@ -226,21 +314,26 @@ def extract_user_level_features_diffstats_style(
 
     max_support_value = support.max(axis=1)
 
-    return np.column_stack([
-        one_list / expected_ones,      # num_ones_scaled
-        one_deviation,                 # one_deviation
-        per_user_k[:, 0],              # k_discrepancy_scaled
-        per_user_k[:, 1],              # k_observed_frequency_scaled
-        per_user_k[:, 2],              # k_theoretical_frequency_scaled
-        per_user_k[:, 3],              # freq_ratio
-        per_user_k[:, 4],              # is_anomalous_k
-        overlap_ratio,                 # overlap_anomalous_items_ratio
-        max_item_freq_ratio,           # max_item_freq_ratio
-        mean_item_freq_ratio,          # mean_item_freq_ratio
-        user_theoretical_deviation,    # user_theoretical_deviation
-        support_entropy_scaled,        # support_entropy_scaled
-        max_support_value,             # max_support_value
-        per_user_k[:, 5],              # log_likelihood
-        per_user_k[:, 6],              # wasserstein_distance_scaled
-        per_user_k[:, 7],              # js_divergence_k
-    ])
+    columns = {
+        'num_ones_scaled':                one_list / expected_ones,
+        'one_deviation':                  one_deviation,
+        'k_discrepancy_scaled':           per_user_k[:, 0],
+        'k_observed_frequency_scaled':    per_user_k[:, 1],
+        'k_theoretical_frequency_scaled': per_user_k[:, 2],
+        'freq_ratio':                     per_user_k[:, 3],
+        'is_anomalous_k':                 per_user_k[:, 4],
+        'overlap_anomalous_items_ratio':  overlap_ratio,
+        'max_item_freq_ratio':            max_item_freq_ratio,
+        'mean_item_freq_ratio':           mean_item_freq_ratio,
+        'user_theoretical_deviation':     user_theoretical_deviation,
+        'support_entropy_scaled':         support_entropy_scaled,
+        'max_support_value':              max_support_value,
+        'log_likelihood':                 per_user_k[:, 5],
+        'wasserstein_distance_scaled':    per_user_k[:, 6],
+        'js_divergence_k':                per_user_k[:, 7],
+    }
+    if feature_set == 'v2':
+        columns['block_projection'], columns['block_overlap'] = \
+            _target_block_features(reported_f, p_binomial, block_candidates)
+
+    return np.column_stack([columns[name] for name in names])

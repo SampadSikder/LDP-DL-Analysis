@@ -5,6 +5,10 @@ from .features import (
     extract_user_level_features_diffstats_style,
     compute_pi_hat,
     FEATURE_NAMES,
+    FEATURE_NAMES_V2,
+    FEATURE_SETS,
+    DEFAULT_BLOCK_CANDIDATES,
+    feature_names_for,
 )
 from .pca_graph import (
     generate_perturbed_data,
@@ -27,6 +31,10 @@ __all__ = [
     'extract_user_level_features_diffstats_style',
     'compute_pi_hat',
     'FEATURE_NAMES',
+    'FEATURE_NAMES_V2',
+    'FEATURE_SETS',
+    'DEFAULT_BLOCK_CANDIDATES',
+    'feature_names_for',
     'generate_perturbed_data',
     'apply_pca_fixed',
     'build_knn_graph',

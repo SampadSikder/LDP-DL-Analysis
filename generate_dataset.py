@@ -24,7 +24,9 @@ from config import (
 from attacker_detector.data.generators import (
     generate_perturbed_data,
     extract_user_level_features_diffstats_style,
-    FEATURE_NAMES,
+    FEATURE_SETS,
+    DEFAULT_BLOCK_CANDIDATES,
+    feature_names_for,
 )
 
 
@@ -59,6 +61,8 @@ def _make_task(args, *, epsilon, dataset_type, domain, n, protocol, ratio,
         'olh_setting': olh_setting,
         'exp_i': exp_i,
         'holdout': holdout,
+        'feature_set': args.feature_set,
+        'block_candidates': args.block_candidates,
         'desc': (
             f"ε={epsilon}, {dataset_type}, {protocol}, "
             f"ratio={ratio}, target={target_size}, "
@@ -201,6 +205,8 @@ def run_one_task(task: dict) -> dict:
             protocol=task['protocol_label'],
             domain=task['domain'],
             n=task['n'],
+            feature_set=task['feature_set'],
+            block_candidates=task['block_candidates'],
         )
 
         # experiment_id is appended by _handle_result (main process), which is
@@ -240,6 +246,10 @@ def write_design(args, tasks: list, output_dir: str) -> None:
 
     design = {
         'design': args.design,
+        'feature_set': args.feature_set,
+        'feature_names': feature_names_for(args.feature_set),
+        'block_candidates': (args.block_candidates
+                             if args.feature_set == 'v2' else None),
         'protocols': list(args.protocols),
         'datasets': list(args.datasets),
         'n': args.n,
@@ -434,6 +444,21 @@ def parse_args():
     )
 
     parser.add_argument(
+        '--feature-set',
+        choices=sorted(FEATURE_SETS),
+        default='v1',
+        help='v1 = the original 16 features; v2 = v1 minus 4 redundant analytic '
+             'k-features plus 2 target-block features (14 columns)'
+    )
+
+    parser.add_argument(
+        '--block-candidates',
+        type=int,
+        default=DEFAULT_BLOCK_CANDIDATES,
+        help='v2 only: highest-z items searched for the coordinated target block'
+    )
+
+    parser.add_argument(
         '--olh-parallel',
         action='store_true',
         help='Run OLH tasks in the outer process pool with --inner-processors 1'
@@ -470,6 +495,8 @@ def parse_args():
         parser.error('--balance-attackers must be a positive integer')
     if args.holdout_replicates < 0:
         parser.error('--holdout-replicates must be >= 0')
+    if args.block_candidates < 2:
+        parser.error('--block-candidates must be >= 2')
     return args
 
 
@@ -477,6 +504,7 @@ def parse_args():
 def main():
     """Main entry point."""
     args = parse_args()
+    feature_names = feature_names_for(args.feature_set)
 
     output_dir = args.output
     os.makedirs(output_dir, exist_ok=True)
@@ -521,8 +549,10 @@ def main():
     print(f"  Sequential tasks: {len(sequential_tasks)}")
     print(f"Outer workers: {args.workers}")
     print(f"Inner processors per task: {args.inner_processors}")
-    print(f"Feature count: {len(FEATURE_NAMES)}")
-    print(f"Features: {FEATURE_NAMES}")
+    print(f"Feature set: {args.feature_set}"
+          + (f" (block candidates: {args.block_candidates})" if args.feature_set == 'v2' else ""))
+    print(f"Feature count: {len(feature_names)}")
+    print(f"Features: {feature_names}")
     print("=" * 80)
 
     # --- Accumulation state ---
@@ -639,7 +669,7 @@ def main():
         print("\nComputing global z-score normalization statistics...")
         norm_path = os.path.join(output_dir, 'norm_stats.json')
         features_all = np.fromfile(features_bin_path, dtype=np.float32).reshape(
-            total_users, len(FEATURE_NAMES)
+            total_users, len(feature_names)
         ).astype(np.float64)
         feat_mean = np.mean(features_all, axis=0)
         feat_std = np.std(features_all, axis=0)
@@ -656,11 +686,11 @@ def main():
 
         # Save normalization stats
         norm_stats = {
-            'feature_names': FEATURE_NAMES,
+            'feature_names': feature_names,
             'mean': feat_mean.tolist(),
             'std': feat_std.tolist(),
             'near_zero_variance_columns': [
-                FEATURE_NAMES[i] for i in range(len(FEATURE_NAMES)) if near_zero[i]
+                feature_names[i] for i in range(len(feature_names)) if near_zero[i]
             ],
         }
         with open(norm_path, 'w') as f:
