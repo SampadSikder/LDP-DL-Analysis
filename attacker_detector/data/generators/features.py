@@ -49,7 +49,10 @@ FEATURE_NAMES_V2 = [f for f in FEATURE_NAMES if f not in _V2_DROPPED] + [
 ]
 
 FEATURE_SETS = {'v1': FEATURE_NAMES, 'v2': FEATURE_NAMES_V2}
-DEFAULT_BLOCK_CANDIDATES = 32
+# Chosen by scripts/sweep_feature_sets.py (results/sweep_v2): 16 gave the best
+# single-feature AUC on OUE, HST_User and OLH across zipf/emoji; 32 and 64 were
+# within noise on the downstream classifier, and fire held up at every M.
+DEFAULT_BLOCK_CANDIDATES = 16
 
 
 def feature_names_for(feature_set: str) -> list:
