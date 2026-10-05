@@ -326,6 +326,12 @@ def parse_args():
         '--balanced-batches', action='store_true',
         help='Every training batch is exactly half attackers, half benign'
     )
+    parser.add_argument(
+        '--save-predictions', action='store_true',
+        help='Write test_predictions.npz: the predicted attacker probability, label '
+             'and (epsilon, ratio, splits, dataset) of every sensitivity row, so '
+             'threshold choices can be evaluated later without retraining'
+    )
 
     args = parser.parse_args()
 
@@ -695,6 +701,10 @@ def main():
             sensitivity_df.to_csv(results_path, index=False)
             print(f"\nSensitivity test results saved to: {results_path}")
 
+        if args.save_predictions and args.output_dir:
+            _save_predictions(model, ds, sens_indices, device,
+                              os.path.join(args.output_dir, 'test_predictions.npz'))
+
         if 'sens_balanced_indices' in split:
             bal = split['sens_balanced_indices']
             print(f"\nRunning Sensitivity Analysis on the balanced held-out view "
@@ -759,6 +769,26 @@ def main():
             _save_sensitivity_plots(eval_sensitivity_df, 'eval', args.output_dir)
 
     print("\nDone!")
+
+
+def _save_predictions(model, ds, indices, device, path, batch_size=4096):
+    """Per-row attacker probability for the given rows, plus what each row is."""
+    model.eval()
+    probs = []
+    with torch.no_grad():
+        for i in range(0, len(indices), batch_size):
+            batch = torch.FloatTensor(ds.features[indices[i:i + batch_size]]).to(device)
+            probs.append(torch.sigmoid(model(batch)).cpu().numpy().ravel())
+    np.savez_compressed(
+        path,
+        prob=np.concatenate(probs).astype(np.float32),
+        label=ds.labels[indices].astype(np.int8),
+        epsilon=ds.epsilons[indices].astype(np.float32),
+        attacker_ratio=ds.attacker_ratios[indices].astype(np.float32),
+        splits=ds.splits[indices].astype(np.int8),
+        dataset=ds.dataset_types[indices].astype('U5'),
+    )
+    print(f"Predictions for {len(indices):,} rows saved to: {path}")
 
 
 def _save_sensitivity_plots(sensitivity_df, split_name, output_dir):

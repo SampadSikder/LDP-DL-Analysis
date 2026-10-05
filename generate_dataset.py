@@ -32,6 +32,17 @@ from attacker_detector.data.generators import (
 
 OLH_PROTOCOLS = {'OLH', 'OLH_User', 'OLH_Server'}
 
+# --attack -> the generator's h_ao switch. Only OUE, OLH_User and HST_User
+# read it; OLH_Server and HST_Server always run MGA-A (the paper defines no
+# APA for server settings).
+#   mga-a       h_ao=0: every fake user reports exactly the expected number of
+#               1s -- the paper's MGA-A (Sec. 3.2 / 4.1.2), what Diffstats is
+#               scored against in its Figure 3.
+#   apa-approx  h_ao=1: the legacy setting. OUE / OLH_User draw each fake
+#               user's count from the genuine distribution (APA-like) with
+#               +-10 jitter; HST_User jitters the MGA-A count by +-10.
+ATTACK_H_AO = {'mga-a': 0, 'apa-approx': 1}
+
 
 def _resolve_protocol(protocol: str):
     """protocol label -> (base protocol passed to the generator, OLH setting)."""
@@ -55,7 +66,7 @@ def _make_task(args, *, epsilon, dataset_type, domain, n, protocol, ratio,
         'target_set_size': target_size,
         'splits': splits,
         'dataset_type': dataset_type,
-        'h_ao': 1,
+        'h_ao': ATTACK_H_AO[args.attack],
         'seed': seed,
         'inner_processors': args.inner_processors,  # not nested so use multi core
         'olh_setting': olh_setting,
@@ -246,6 +257,7 @@ def write_design(args, tasks: list, output_dir: str) -> None:
 
     design = {
         'design': args.design,
+        'attack': args.attack,
         'feature_set': args.feature_set,
         'feature_names': feature_names_for(args.feature_set),
         'block_candidates': (args.block_candidates
@@ -444,6 +456,14 @@ def parse_args():
     )
 
     parser.add_argument(
+        '--attack',
+        choices=sorted(ATTACK_H_AO),
+        default='apa-approx',
+        help='mga-a = the paper\'s MGA-A (fixed count of 1s per fake user); '
+             'apa-approx = legacy h_ao=1 behaviour (default, reproduces existing data)'
+    )
+
+    parser.add_argument(
         '--feature-set',
         choices=sorted(FEATURE_SETS),
         default='v1',
@@ -533,6 +553,7 @@ def main():
     print(f"Ratios: {args.ratios}")
     print(f"Target sizes: {args.target_sizes}")
     print(f"Splits: {args.splits}")
+    print(f"Attack: {args.attack} (h_ao={ATTACK_H_AO[args.attack]})")
     print(f"Design: {args.design}")
     if args.design == 'oat':
         print(f"  Defaults: eps={args.default_epsilon}, ratio={args.default_ratio}, "
