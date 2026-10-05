@@ -124,10 +124,18 @@ def compute_pi_hat(support_list: np.ndarray, protocol: str, epsilon: float, doma
     return _estimate_pi_hat(support_binary, p, q), p, q
 
 
-def _k_lookup_table(one_list: np.ndarray, domain: int, p_binomial: float):
+def _k_lookup_table(one_list: np.ndarray, domain: int, p_binomial: float,
+                    with_analytic: bool = True):
     """
-    Per-unique-k features. Every k-dependent feature is a function of the user's
-    k alone, so each is computed once per distinct k and indexed per user.
+    Per-unique-k features, as {name: array over distinct k} plus the index that
+    maps each user to their k. Every k-dependent feature is a function of the
+    user's k alone, so each is computed once per distinct k.
+
+    The four analytic columns (k_theoretical_frequency_scaled, log_likelihood,
+    wasserstein_distance_scaled, js_divergence_k) depend on k only through the
+    analytic null, so given num_ones_scaled / one_deviation they add nothing.
+    Only the v1 feature set uses them; with_analytic=False skips them, including
+    the per-k Wasserstein / JS loop that dominates this function's cost.
     """
     k_values, inverse, k_counts = np.unique(
         one_list.astype(int), return_inverse=True, return_counts=True
@@ -143,10 +151,17 @@ def _k_lookup_table(one_list: np.ndarray, domain: int, p_binomial: float):
 
     # Ratio of two same-unit masses: already dimensionless.
     freq_ratio = observed_freq / (theoretical_freq + 1e-10)
-    log_likelihood = np.log(theoretical_freq * sigma_k + 1e-10)
+
+    table = {
+        'k_discrepancy_scaled':        k_discrepancies * sigma_k,
+        'k_observed_frequency_scaled': observed_freq * sigma_k,
+        'freq_ratio':                  freq_ratio,
+        'is_anomalous_k':              is_anomalous_k,
+    }
+    if not with_analytic:
+        return table, inverse, sigma_k
 
     theoretical_freq_norm = theoretical_freq / (np.sum(theoretical_freq) + 1e-10)
-
     n_k = len(k_values)
     wasserstein = np.empty(n_k, dtype=np.float64)
     js_divergence = np.empty(n_k, dtype=np.float64)
@@ -160,16 +175,12 @@ def _k_lookup_table(one_list: np.ndarray, domain: int, p_binomial: float):
         )
         js_divergence[idx] = jensenshannon(one_hot, theoretical_freq_norm)
 
-    table = np.column_stack([
-        k_discrepancies * sigma_k,
-        observed_freq * sigma_k,
-        theoretical_freq * sigma_k,
-        freq_ratio,
-        is_anomalous_k,
-        log_likelihood,
-        wasserstein / sigma_k,              # distance to a mass of width sigma_k, not d
-        np.nan_to_num(js_divergence, nan=0.0),
-    ])
+    table.update({
+        'k_theoretical_frequency_scaled': theoretical_freq * sigma_k,
+        'log_likelihood':                 np.log(theoretical_freq * sigma_k + 1e-10),
+        'wasserstein_distance_scaled':    wasserstein / sigma_k,  # distance to a mass of width sigma_k, not d
+        'js_divergence_k':                np.nan_to_num(js_divergence, nan=0.0),
+    })
     return table, inverse, sigma_k
 
 
@@ -272,8 +283,9 @@ def extract_user_level_features_diffstats_style(
     support = np.asarray(support_list, dtype=np.float64)
     one_list = np.asarray(one_list, dtype=np.float64)
 
-    k_table, k_index, sigma_k = _k_lookup_table(one_list, domain, p_binomial)
-    per_user_k = k_table[k_index]
+    k_table, k_index, sigma_k = _k_lookup_table(
+        one_list, domain, p_binomial, with_analytic=(feature_set == 'v1'))
+    per_user_k = {name: values[k_index] for name, values in k_table.items()}
 
     one_deviation = np.abs(one_list - expected_ones) / sigma_k
 
@@ -320,20 +332,13 @@ def extract_user_level_features_diffstats_style(
     columns = {
         'num_ones_scaled':                one_list / expected_ones,
         'one_deviation':                  one_deviation,
-        'k_discrepancy_scaled':           per_user_k[:, 0],
-        'k_observed_frequency_scaled':    per_user_k[:, 1],
-        'k_theoretical_frequency_scaled': per_user_k[:, 2],
-        'freq_ratio':                     per_user_k[:, 3],
-        'is_anomalous_k':                 per_user_k[:, 4],
+        **per_user_k,
         'overlap_anomalous_items_ratio':  overlap_ratio,
         'max_item_freq_ratio':            max_item_freq_ratio,
         'mean_item_freq_ratio':           mean_item_freq_ratio,
         'user_theoretical_deviation':     user_theoretical_deviation,
         'support_entropy_scaled':         support_entropy_scaled,
         'max_support_value':              max_support_value,
-        'log_likelihood':                 per_user_k[:, 5],
-        'wasserstein_distance_scaled':    per_user_k[:, 6],
-        'js_divergence_k':                per_user_k[:, 7],
     }
     if feature_set == 'v2':
         columns['block_projection'], columns['block_overlap'] = \
