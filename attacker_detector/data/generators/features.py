@@ -184,7 +184,30 @@ def _k_lookup_table(one_list: np.ndarray, domain: int, p_binomial: float,
     return table, inverse, sigma_k
 
 
+def _row_chunks(n: int, domain: int, max_cells: int = 1 << 25):
+    """(start, stop) row slices of ~max_cells cells each (~256 MB as float64),
+    so per-user features never need a full n x domain copy."""
+    rows = max(1, max_cells // max(domain, 1))
+    return [(a, min(a + rows, n)) for a in range(0, n, rows)]
+
+
+def _add_rows(acc: np.ndarray, rows: np.ndarray) -> np.ndarray:
+    """acc + rows[0] + rows[1] + ..., added in row order -- the same order
+    numpy uses for a whole-matrix sum(axis=0), so chunked totals are bitwise
+    identical to unchunked ones even for non-integer (HST) values."""
+    return np.add.reduce(np.vstack([acc[np.newaxis, :], rows]), axis=0)
+
+
 def _target_block_features(reported_f: np.ndarray, p_binomial: float, n_candidates: int):
+    """Whole-matrix convenience wrapper around _target_block_from_counts."""
+    return _target_block_from_counts(
+        reported_f.sum(axis=0), lambda cand: reported_f[:, cand],
+        reported_f.shape[0], p_binomial, n_candidates,
+    )
+
+
+def _target_block_from_counts(counts: np.ndarray, candidate_columns, n: int,
+                              p_binomial: float, n_candidates: int):
     """Per-user score against the run's most coordinated block of items.
 
     Every attacker in a run promotes a subset of the same target set, so the
@@ -202,15 +225,17 @@ def _target_block_features(reported_f: np.ndarray, p_binomial: float, n_candidat
     Uses only the reports and public protocol parameters, never labels or the
     true item distribution.
 
+    Only the per-item report counts and the n_candidates selected columns are
+    needed (candidate_columns(cand) -> n x len(cand) 0/1 matrix), so the cost is
+    O(n * n_candidates) after counting -- never a full n x domain copy.
+
     Returns (block_projection, block_overlap), both dimensionless:
       block_projection  the user's centered candidate reports projected onto v,
                         divided by that projection's std within the run
       block_overlap     share of the block's positive loading mass the user reports
     """
-    n = reported_f.shape[0]
     zeros = np.zeros(n, dtype=np.float64)
 
-    counts = reported_f.sum(axis=0)
     null_sd = math.sqrt(max(n * p_binomial * (1.0 - p_binomial), 1e-12))
     z = (counts - n * p_binomial) / null_sd
 
@@ -219,7 +244,7 @@ def _target_block_features(reported_f: np.ndarray, p_binomial: float, n_candidat
     if len(cand) < 2:
         return zeros, zeros
 
-    Xs = reported_f[:, cand]
+    Xs = candidate_columns(cand)
     Xc = Xs - Xs.mean(axis=0)
     cov = Xc.T @ Xc / n
     np.fill_diagonal(cov, 0.0)  # variance says nothing about co-occurrence
@@ -280,7 +305,6 @@ def extract_user_level_features_diffstats_style(
     _, _, expected_ones = _protocol_params(protocol, epsilon, domain)
     _, _, _, p_binomial = _protocol_pq(protocol, epsilon, domain)
 
-    support = np.asarray(support_list, dtype=np.float64)
     one_list = np.asarray(one_list, dtype=np.float64)
 
     k_table, k_index, sigma_k = _k_lookup_table(
@@ -289,45 +313,70 @@ def extract_user_level_features_diffstats_style(
 
     one_deviation = np.abs(one_list - expected_ones) / sigma_k
 
+    # The full report matrix is never copied: every per-user feature depends on
+    # the user's own row plus per-item totals, so rows are processed in slices
+    # (_row_chunks) and peak memory stays flat as n grows. Per-row arithmetic is
+    # unchanged, so results are identical to a whole-matrix computation.
+    chunks = _row_chunks(n, domain)
+
+    # Pass 1 -- per-item totals. Rows are accumulated in order (_add_rows), the
+    # same summation order as support.sum(axis=0) over the whole matrix.
+    item_counts = np.zeros(domain, dtype=np.float64)       # raw support (HST: signed)
+    reported_counts = np.zeros(domain, dtype=np.float64)   # reports that support each item
+    for a, b in chunks:
+        S = np.asarray(support_list[a:b], dtype=np.float64)
+        item_counts = _add_rows(item_counts, S)
+        reported_counts = _add_rows(reported_counts, (S > 0).astype(np.float64))
+
     # Every item is equally likely to be reported under complete ignorance of
     # true item popularity -- the only baseline computable without the true
     # (never-observed-at-inference) distribution. See module docstring.
-    item_counts = support.sum(axis=0)
     expected_item_counts = n * p_binomial
     item_frequency_ratio = item_counts / (expected_item_counts + 1e-10)
     anomalous_items = item_frequency_ratio > ANOMALY_THRESHOLD
 
-    reported = support > 0
-    reported_f = reported.astype(np.float64)
-    num_reported = reported.sum(axis=1).astype(np.float64)
-    has_any = num_reported > 0
+    # Pass 2 -- per-user features, one slice of rows at a time.
+    overlap_ratio = np.empty(n)
+    max_item_freq_ratio = np.empty(n)
+    mean_item_freq_ratio = np.empty(n)
+    user_theoretical_deviation = np.empty(n)
+    support_entropy_scaled = np.empty(n)
+    max_support_value = np.empty(n)
+    log_domain = math.log(domain)
 
-    overlap_count = (reported & anomalous_items).sum(axis=1).astype(np.float64)
-    overlap_ratio = overlap_count / (num_reported + 1e-10)
+    for a, b in chunks:
+        S = np.asarray(support_list[a:b], dtype=np.float64)
+        reported = S > 0
+        num_reported = reported.sum(axis=1).astype(np.float64)
+        has_any = num_reported > 0
 
-    max_item_freq_ratio = np.where(
-        has_any,
-        np.where(reported, item_frequency_ratio, -np.inf).max(axis=1),
-        0.0,
-    )
+        overlap_count = (reported & anomalous_items).sum(axis=1).astype(np.float64)
+        overlap_ratio[a:b] = overlap_count / (num_reported + 1e-10)
 
-    denom = np.where(has_any, num_reported, 1.0)
-    ratio_sum = (reported * item_frequency_ratio).sum(axis=1)
-    mean_item_freq_ratio = np.where(has_any, ratio_sum / denom, 0.0)
+        max_item_freq_ratio[a:b] = np.where(
+            has_any,
+            np.where(reported, item_frequency_ratio, -np.inf).max(axis=1),
+            0.0,
+        )
 
-    # Binarized: support_list is 0/1 for OUE/OLH but real-valued (+-c-scaled)
-    # for HST, so compare the reported-or-not indicator, not the raw values.
-    user_theoretical_deviation = np.mean(np.abs(reported_f - p_binomial), axis=1)
+        denom = np.where(has_any, num_reported, 1.0)
+        ratio_sum = (reported * item_frequency_ratio).sum(axis=1)
+        mean_item_freq_ratio[a:b] = np.where(has_any, ratio_sum / denom, 0.0)
 
-    support_probs = support / (one_list[:, np.newaxis] + 1e-10)
-    positive = support_probs > 0
-    safe_probs = np.where(positive, support_probs, 1.0)
-    support_entropy = -(
-        np.where(positive, safe_probs * np.log(safe_probs), 0.0)
-    ).sum(axis=1)
-    support_entropy_scaled = support_entropy / math.log(domain)
+        # Binarized: support_list is 0/1 for OUE/OLH but real-valued (+-c-scaled)
+        # for HST, so compare the reported-or-not indicator, not the raw values.
+        user_theoretical_deviation[a:b] = np.mean(
+            np.abs(reported.astype(np.float64) - p_binomial), axis=1)
 
-    max_support_value = support.max(axis=1)
+        support_probs = S / (one_list[a:b, np.newaxis] + 1e-10)
+        positive = support_probs > 0
+        safe_probs = np.where(positive, support_probs, 1.0)
+        support_entropy = -(
+            np.where(positive, safe_probs * np.log(safe_probs), 0.0)
+        ).sum(axis=1)
+        support_entropy_scaled[a:b] = support_entropy / log_domain
+
+        max_support_value[a:b] = S.max(axis=1)
 
     columns = {
         'num_ones_scaled':                one_list / expected_ones,
@@ -341,7 +390,10 @@ def extract_user_level_features_diffstats_style(
         'max_support_value':              max_support_value,
     }
     if feature_set == 'v2':
-        columns['block_projection'], columns['block_overlap'] = \
-            _target_block_features(reported_f, p_binomial, block_candidates)
+        columns['block_projection'], columns['block_overlap'] = _target_block_from_counts(
+            reported_counts,
+            lambda cand: (np.asarray(support_list[:, cand], dtype=np.float64) > 0).astype(np.float64),
+            n, p_binomial, block_candidates,
+        )
 
     return np.column_stack([columns[name] for name in names])

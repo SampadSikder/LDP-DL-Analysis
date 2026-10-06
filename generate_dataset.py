@@ -291,6 +291,51 @@ def write_design(args, tasks: list, output_dir: str) -> None:
         json.dump(design, f, indent=2)
 
 
+def _config_chunks(config_bin_path, headers_only=False):
+    """Yield the length-prefixed .npy chunks of config.bin -- as (shape, dtype)
+    from the header alone, or as loaded arrays."""
+    import io
+    with open(config_bin_path, 'rb') as c_bin:
+        while True:
+            length_bytes = c_bin.read(8)
+            if len(length_bytes) < 8:
+                return
+            length = int.from_bytes(length_bytes, 'little')
+            start = c_bin.tell()
+            if headers_only:
+                version = np.lib.format.read_magic(c_bin)
+                read_header = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+                               else np.lib.format.read_array_header_2_0)
+                shape, _, dtype = read_header(c_bin)
+                yield shape, dtype
+                c_bin.seek(start + length)
+            else:
+                yield np.load(io.BytesIO(c_bin.read(length)), allow_pickle=True)
+
+
+def assemble_config(config_bin_path, config_path):
+    """config.bin -> config.npy, streaming into a memory-mapped output so only
+    one chunk is ever in RAM (np.vstack of all chunks needed ~2x the file).
+
+    Pass 1 reads only the chunk headers to size the output; the dtype is the
+    widest chunk's, which is what np.vstack would have produced, so the file
+    is the same. Returns the shape, or None if there were no chunks."""
+    metas = list(_config_chunks(config_bin_path, headers_only=True))
+    if not metas:
+        return None
+    rows = sum(shape[0] for shape, _ in metas)
+    cols = metas[0][0][1]
+    dtype = np.result_type(*[dt for _, dt in metas])
+    out = np.lib.format.open_memmap(config_path, mode='w+', dtype=dtype, shape=(rows, cols))
+    row = 0
+    for chunk in _config_chunks(config_bin_path):
+        out[row:row + len(chunk)] = chunk
+        row += len(chunk)
+    out.flush()
+    del out
+    return (rows, cols)
+
+
 def flush_to_disk(
     all_features,
     all_labels,
@@ -479,6 +524,15 @@ def parse_args():
     )
 
     parser.add_argument(
+        '--tasks-per-worker',
+        type=int,
+        default=50,
+        help='Tasks each worker process runs before the pool is recreated. Large n '
+             '(hundreds of thousands of users): use 1-2 so worker memory is released '
+             'between tasks'
+    )
+
+    parser.add_argument(
         '--olh-parallel',
         action='store_true',
         help='Run OLH tasks in the outer process pool with --inner-processors 1'
@@ -515,6 +569,8 @@ def parse_args():
         parser.error('--balance-attackers must be a positive integer')
     if args.holdout_replicates < 0:
         parser.error('--holdout-replicates must be >= 0')
+    if args.tasks_per_worker < 1:
+        parser.error('--tasks-per-worker must be >= 1')
     if args.block_candidates < 2:
         parser.error('--block-candidates must be >= 2')
     return args
@@ -630,7 +686,9 @@ def main():
     if parallel_tasks:
         print(f"\n--- Phase 1: {len(parallel_tasks)} OUE/HST tasks in parallel ---")
 
-        batch_size = max(SAVE_EVERY, args.workers * 50)
+        # A fresh process pool per batch: worker memory is returned to the OS
+        # every --tasks-per-worker tasks instead of ratcheting up for the run.
+        batch_size = max(1, args.workers * args.tasks_per_worker)
         for batch_start in range(0, len(parallel_tasks), batch_size):
             batch = parallel_tasks[batch_start:batch_start + batch_size]
             batch_end = min(batch_start + batch_size, len(parallel_tasks))
@@ -647,13 +705,16 @@ def main():
                     total=len(futures),
                     desc=f"Parallel [{batch_start+1}-{batch_end}]"
                 ):
+                    # pop so the finished future -- and the result it holds -- can
+                    # be freed now, not when the whole batch ends
+                    task_info = futures.pop(future)
                     try:
                         result = future.result()
                         _handle_result(result)
                     except Exception as e:
-                        task_info = futures[future]
                         num_failed += 1
                         print(f'[CRASH] {task_info["desc"]} | Worker killed: {e}')
+                    result = None
 
                     if len(all_features) >= SAVE_EVERY:
                         flush_to_disk(
@@ -729,22 +790,9 @@ def main():
 
     if os.path.exists(config_bin_path):
         print("\nReconstructing config.npy from binary chunks...")
-        import io
-        chunks = []
-        with open(config_bin_path, 'rb') as c_bin:
-            while True:
-                length_bytes = c_bin.read(8)
-                if not length_bytes or len(length_bytes) < 8:
-                    break
-                length = int.from_bytes(length_bytes, 'little')
-                chunk_bytes = c_bin.read(length)
-                chunk = np.load(io.BytesIO(chunk_bytes), allow_pickle=True)
-                chunks.append(chunk)
-        if chunks:
-            config_all = np.vstack(chunks)
-            np.save(config_path, config_all)
-            print(f"  Saved config.npy: {config_all.shape}")
-            del config_all, chunks
+        shape = assemble_config(config_bin_path, config_path)
+        if shape is not None:
+            print(f"  Saved config.npy: {shape}")
         os.remove(config_bin_path)
 
     print("\n" + "=" * 80)
