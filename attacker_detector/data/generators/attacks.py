@@ -19,6 +19,25 @@ _worker_domain = None
 _worker_q_OUE = None
 
 
+def apa_counts(m: int, omega_probs: np.ndarray) -> np.ndarray:
+    """Per-fake-user support counts for the optimal APA attack (paper Sec. 4.1.4).
+
+    Exactly omega[k] = floor(m * P(X = k)) fake users get count k, so the fake
+    users' count histogram matches the genuine one as closely as integers
+    allow; the few users left over by flooring go to the k values with the
+    largest fractional parts. Returned in random order (seeded by the caller's
+    np.random state).
+    """
+    expected = m * np.asarray(omega_probs, dtype=np.float64)
+    counts = np.floor(expected).astype(np.int64)
+    leftover = int(m - counts.sum())
+    if leftover > 0:
+        counts[np.argsort(-(expected - counts))[:leftover]] += 1
+    ks = np.repeat(np.arange(len(counts)), counts)
+    np.random.shuffle(ks)
+    return ks
+
+
 def _init_worker(X, domain, q_OUE):
     """Initialize worker process with shared data."""
     global _worker_X, _worker_domain, _worker_q_OUE
@@ -36,7 +55,9 @@ def _perturb_oue_process(args):
     q_OUE = _worker_q_OUE
     
     local_user_data = np.zeros((end - start, domain), dtype=int)
-    h_ao_local = int(h_ao * 10)
+    # +-10 jitter on the count only for the legacy h_ao=1 setting; MGA-A (0) and
+    # exact APA (2) use each fake user's assigned count as is.
+    h_ao_local = 10 if h_ao == 1 else 0
 
     for idx, i in enumerate(range(start, end)):
         v = int(_worker_X[i])
@@ -108,7 +129,12 @@ def perturb_OUE_multi(
     
     # Prepare average_1_num_list
     omega_probs = construct_omega(epsilon, domain, 'OUE')
-    if h_ao == 1:
+    if h_ao == 2:
+        # exact APA: fake users' counts follow omega[k] = floor(m * P(X=k))
+        is_fake = np.arange(n) >= n * (1 - ratio)
+        average_1_num_list = np.zeros(n, dtype=int)
+        average_1_num_list[is_fake] = apa_counts(int(is_fake.sum()), omega_probs)
+    elif h_ao == 1:
         average_1_num_list = np.random.choice(np.arange(domain), size=n, p=omega_probs)
     else:
         average_1_num_list = np.full(n, int(0.5 + (domain - 1) * q_OUE), dtype=int)
@@ -632,7 +658,12 @@ def HST_Users(X, ratio, domain, epsilon, n, target_set, h_ao, splits):
     fake_user_num = int(round(n * ratio))
     normal_user_num = n - fake_user_num
     start_idx = n - fake_user_num
-    h_ao *= 10
+    # Exact APA (h_ao=2): each fake user's count of +1 positions follows the
+    # genuine B(d, 1/2) histogram, omega[k] = floor(m * P(X=k)). Otherwise every
+    # fake user targets d/2, jittered by +-10*h_ao (0 = MGA-A, 1 = legacy).
+    apa_k = (apa_counts(fake_user_num, construct_omega(epsilon, domain, 'HST_User'))
+             if h_ao == 2 else None)
+    h_ao = 0 if h_ao == 2 else h_ao * 10
     y_values = np.zeros(n)
     # theoretical APA use the omega_list to replace the averge_1_num and set h_ao = 0
     '''if h_ao != 0:
@@ -658,7 +689,8 @@ def HST_Users(X, ratio, domain, epsilon, n, target_set, h_ao, splits):
         local_user_data = np.full(domain, -1.0)
         local_user_data[list(splits_list)] = 1
         remaining_set = list(set(range(domain)) - set(splits_list))
-        diff = int(average_1_num - len(splits_list))
+        target_count = apa_k[i] if apa_k is not None else average_1_num
+        diff = int(target_count - len(splits_list))
         diff_AO = random.randint(diff - h_ao, diff + h_ao)
         diff_AO = max(0, min(diff_AO, len(remaining_set)))
         #print(f'attacker:{i}, exp1:{average_1_num}, h_ao:{h_ao}, splits:{splits}')

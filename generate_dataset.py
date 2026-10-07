@@ -38,10 +38,13 @@ OLH_PROTOCOLS = {'OLH', 'OLH_User', 'OLH_Server'}
 #   mga-a       h_ao=0: every fake user reports exactly the expected number of
 #               1s -- the paper's MGA-A (Sec. 3.2 / 4.1.2), what Diffstats is
 #               scored against in its Figure 3.
+#   apa         h_ao=2: the paper's optimal APA (Sec. 4.1.4) for OUE and
+#               HST_User -- exactly floor(m * P(X=k)) fake users report k 1s,
+#               no jitter, so the count histogram matches genuine users.
 #   apa-approx  h_ao=1: the legacy setting. OUE / OLH_User draw each fake
 #               user's count from the genuine distribution (APA-like) with
 #               +-10 jitter; HST_User jitters the MGA-A count by +-10.
-ATTACK_H_AO = {'mga-a': 0, 'apa-approx': 1}
+ATTACK_H_AO = {'mga-a': 0, 'apa-approx': 1, 'apa': 2}
 
 
 def _resolve_protocol(protocol: str):
@@ -505,6 +508,7 @@ def parse_args():
         choices=sorted(ATTACK_H_AO),
         default='apa-approx',
         help='mga-a = the paper\'s MGA-A (fixed count of 1s per fake user); '
+             'apa = the paper\'s optimal APA (OUE, HST_User); '
              'apa-approx = legacy h_ao=1 behaviour (default, reproduces existing data)'
     )
 
