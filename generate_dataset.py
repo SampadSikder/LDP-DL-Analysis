@@ -32,15 +32,17 @@ from attacker_detector.data.generators import (
 
 OLH_PROTOCOLS = {'OLH', 'OLH_User', 'OLH_Server'}
 
-# --attack -> the generator's h_ao switch. Only OUE, OLH_User and HST_User
-# read it; OLH_Server and HST_Server always run MGA-A (the paper defines no
-# APA for server settings).
+# --attack -> the generator's h_ao switch. HST_Server ignores it and always runs
+# MGA-A: the server fixes the count of +1s, so there is no count to shape.
 #   mga-a       h_ao=0: every fake user reports exactly the expected number of
 #               1s -- the paper's MGA-A (Sec. 3.2 / 4.1.2), what Diffstats is
 #               scored against in its Figure 3.
 #   apa         h_ao=2: the paper's optimal APA (Sec. 4.1.4) for OUE and
 #               HST_User -- exactly floor(m * P(X=k)) fake users report k 1s,
 #               no jitter, so the count histogram matches genuine users.
+#               OLH_Server (not in the paper): server-side APA, the same
+#               histogram reached by choosing among each fake user's g buckets
+#               (attacks.choose_server_apa_buckets).
 #   apa-approx  h_ao=1: the legacy setting. OUE / OLH_User draw each fake
 #               user's count from the genuine distribution (APA-like) with
 #               +-10 jitter; HST_User jitters the MGA-A count by +-10.

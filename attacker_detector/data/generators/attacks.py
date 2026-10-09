@@ -19,20 +19,28 @@ _worker_domain = None
 _worker_q_OUE = None
 
 
-def apa_counts(m: int, omega_probs: np.ndarray) -> np.ndarray:
-    """Per-fake-user support counts for the optimal APA attack (paper Sec. 4.1.4).
+def apa_quota(m: int, omega_probs: np.ndarray) -> np.ndarray:
+    """How many of m fake users report each count k under optimal APA.
 
-    Exactly omega[k] = floor(m * P(X = k)) fake users get count k, so the fake
-    users' count histogram matches the genuine one as closely as integers
-    allow; the few users left over by flooring go to the k values with the
-    largest fractional parts. Returned in random order (seeded by the caller's
-    np.random state).
+    omega[k] = floor(m * P(X = k)); the few users left over by flooring go to
+    the k values with the largest fractional parts, so the quota sums to m.
     """
     expected = m * np.asarray(omega_probs, dtype=np.float64)
     counts = np.floor(expected).astype(np.int64)
     leftover = int(m - counts.sum())
     if leftover > 0:
         counts[np.argsort(-(expected - counts))[:leftover]] += 1
+    return counts
+
+
+def apa_counts(m: int, omega_probs: np.ndarray) -> np.ndarray:
+    """Per-fake-user support counts for the optimal APA attack (paper Sec. 4.1.4).
+
+    Exactly apa_quota(m, omega_probs)[k] fake users get count k, so the fake
+    users' count histogram matches the genuine one as closely as integers
+    allow. Returned in random order (seeded by the caller's np.random state).
+    """
+    counts = apa_quota(m, omega_probs)
     ks = np.repeat(np.arange(len(counts)), counts)
     np.random.shuffle(ks)
     return ks
@@ -296,7 +304,6 @@ def process_attacker(i, n, ratio, target_set, g, domain, splits, h_ao, e, K_valu
 
 
 def process_user_seeds(i, User_Seed_noattack, Y_Nattack, domain, g):
-    print("Processing index" + str(i))
     local_estimate = np.zeros(domain)
     user_seed = User_Seed_noattack[i]
     for v in range(domain):
@@ -507,44 +514,137 @@ def process_attacker_server(i, n, ratio, target_set, g, domain, User_Seed, split
         if hashed_value == best_hashed_value:
             attack_vector[v] = 1
 
-    print(f'attacker:{i}, best_hashed_value:{best_hashed_value}, max_targets_mapped:{max_target_count}')
     return index, attack_vector
 
 
-def build_support_list_1_OLH_Server(domain, Y, n, User_Seed, ratio, g, target_set, p, splits, h_ao=0, epsilon=1.0, processor=100):
+def _olh_server_buckets(index_seed, g, domain):
+    '''Bucket h_seed(v) of every item v under one fake user's server-assigned
+    hash -- the user's whole choice set (bucket b supports h^-1(b)).'''
+    index, user_seed = index_seed
+    buckets = np.empty(domain, dtype=np.uint8)
+    for v in range(domain):
+        buckets[v] = xxhash.xxh3_64(str(v).encode(), seed=int(user_seed)).intdigest() % g
+    return index, buckets
+
+
+def choose_server_apa_buckets(sizes, coverage, omega_probs, mode='hist'):
+    '''Pick one bucket per fake user for server-side APA (S-APA).
+
+    In OLH-Server a fake user can only choose which of its g buckets to report,
+    and that choice fixes both its support count (bucket size) and how many of
+    its targets it covers. Both modes make the fake users' count histogram
+    follow the genuine one, omega[k] = floor(m * P(X=k)) (apa_quota):
+
+      'user'  each fake user draws its own count k* (apa_counts) and takes the
+              bucket whose size is closest to k*; coverage only breaks ties.
+      'hist'  the quota is enforced over the whole population: (user, bucket)
+              pairs are taken in order of coverage while their count bin still
+              has room, so coverage decides who fills which bin. Users whose
+              bins are all full take the bucket whose bin has the most room left.
+
+    :param sizes: (m, g) support count of each bucket
+    :param coverage: (m, g) number of the user's targets in each bucket
+    :return: (m,) chosen bucket per fake user
+    '''
+    m, g = sizes.shape
+    rows = np.arange(m)
+    if mode == 'user':
+        k_star = apa_counts(m, omega_probs)
+        # Lexicographic: count distance first, then more targets covered.
+        score = np.abs(sizes - k_star[:, None]) * (g + 1 + coverage.max()) - coverage
+        return np.argmin(score, axis=1)
+    if mode != 'hist':
+        raise ValueError(f"Unknown server APA mode: {mode}")
+
+    quota = apa_quota(m, omega_probs)
+    remaining = np.concatenate([quota, np.zeros(max(0, sizes.max() + 1 - len(quota)), np.int64)])
+    chosen = np.full(m, -1, dtype=np.int64)
+    # Random order first so equal-coverage pairs are taken in random order.
+    pairs = np.random.permutation(m * g)
+    pairs = pairs[np.argsort(-coverage.ravel()[pairs], kind='stable')]
+    for pair in pairs:
+        j, b = divmod(int(pair), g)
+        k = sizes[j, b]
+        if chosen[j] < 0 and remaining[k] > 0:
+            chosen[j] = b
+            remaining[k] -= 1
+    for j in np.flatnonzero(chosen < 0):
+        b = int(np.argmax(remaining[sizes[j]]))
+        chosen[j] = b
+        remaining[sizes[j, b]] -= 1
+    return chosen
+
+
+def _olh_server_apa_vectors(n, num_attackers, User_Seed, g, domain, target_set,
+                            splits, epsilon, processor, mode):
+    '''Fake users' support vectors under server-side APA (see
+    choose_server_apa_buckets). Subsets are drawn here, from the caller's
+    seeded np.random state, so workers need no randomness of their own.'''
+    start = n - num_attackers
+    targets = np.array(sorted(target_set))
+    subsets = np.array([np.random.choice(targets, splits, replace=False)
+                        for _ in range(num_attackers)]).reshape(num_attackers, splits)
+
+    work = [(start + i, User_Seed[start + i]) for i in range(num_attackers)]
+    with Pool(processes=processor) as pool:
+        results = list(tqdm(
+            pool.imap(partial(_olh_server_buckets, g=g, domain=domain), work, chunksize=64),
+            total=num_attackers,
+            desc='Hashing attackers (S-APA)'
+        ))
+    buckets = np.empty((num_attackers, domain), dtype=np.uint8)
+    for index, row in results:
+        buckets[index - start] = row
+
+    sizes = np.stack([(buckets == b).sum(axis=1) for b in range(g)], axis=1)
+    target_buckets = np.take_along_axis(buckets, subsets, axis=1)
+    coverage = np.stack([(target_buckets == b).sum(axis=1) for b in range(g)], axis=1)
+    chosen = choose_server_apa_buckets(
+        sizes, coverage, construct_omega(epsilon, domain, 'OLH_Server'), mode)
+    return (buckets == chosen[:, None].astype(np.uint8)).astype(np.float64)
+
+
+def build_support_list_1_OLH_Server(domain, Y, n, User_Seed, ratio, g, target_set, p, splits, h_ao=0, epsilon=1.0, processor=100, server_apa='hist'):
     '''
     build the support list matrix
+    h_ao=2 runs server-side APA (choose_server_apa_buckets, mode server_apa);
+    any other h_ao runs MGA-A (best-covering bucket per fake user).
     :return:
     '''
-    # Prepare the partial function with fixed arguments for multiprocessing
-    process_attacker_partial = partial(
-        process_attacker_server,
-        n=n,
-        ratio=ratio,
-        target_set=target_set,
-        g=g,
-        domain=domain,
-        User_Seed=User_Seed,
-        splits=splits
-    )
-
     # Calculate the number of attackers
     num_attackers = int(round(n * ratio))
     num_normal = int(n - num_attackers)
 
-    # Parallel execution of process_attacker using multiprocessing
-    with Pool(processes=processor) as pool:
-        # Use imap to process in parallel and tqdm for progress bar
-        results = list(tqdm(
-            pool.imap(process_attacker_partial, range(num_attackers)),
-            total=num_attackers,
-            desc='Processing attackers'
-        ))
+    if h_ao == 2:
+        vector_matrix = _olh_server_apa_vectors(
+            n, num_attackers, User_Seed, g, domain, target_set, splits,
+            epsilon, processor, server_apa)
+    else:
+        # Prepare the partial function with fixed arguments for multiprocessing
+        process_attacker_partial = partial(
+            process_attacker_server,
+            n=n,
+            ratio=ratio,
+            target_set=target_set,
+            g=g,
+            domain=domain,
+            User_Seed=User_Seed,
+            splits=splits
+        )
 
-    vector_matrix = np.zeros((num_attackers, domain))
-    # Update User_Seed with the results from all attackers
-    for i, (index, best_vector) in enumerate(results):
-        vector_matrix[i, :] = best_vector
+        # Parallel execution of process_attacker using multiprocessing
+        with Pool(processes=processor) as pool:
+            # Use imap to process in parallel and tqdm for progress bar
+            results = list(tqdm(
+                pool.imap(process_attacker_partial, range(num_attackers)),
+                total=num_attackers,
+                desc='Processing attackers'
+            ))
+
+        vector_matrix = np.zeros((num_attackers, domain))
+        # Update User_Seed with the results from all attackers
+        for i, (index, best_vector) in enumerate(results):
+            vector_matrix[i, :] = best_vector
 
     # Create a partial function with fixed arguments for processing user seeds
     process_partial = partial(
@@ -614,8 +714,9 @@ def HST_Server(X, ratio, domain, epsilon, n, target_set, splits):
         else:
             y = -c * s_i_v
         y_values[i] = y
-    splits_list = random.sample(list(target_set), splits)
     for i in range(fake_user_num):
+        # MGA-A: each fake user promotes its own r'-subset of the targets.
+        splits_list = random.sample(list(target_set), splits)
         idx = start_idx + i
         s_i = s_vectors[idx, :]
         positive_count = 0
@@ -630,11 +731,12 @@ def HST_Server(X, ratio, domain, epsilon, n, target_set, splits):
         else:
             y = -c
         y_values[idx] = y
-        print(f'Attacker {i}, idx: {idx}, positive_count: {positive_count}, negative_count: {negative_count}, y: {y}')
 
     support_list = y_values.reshape(-1, 1) * s_vectors
     ESTIMATE_DIST = np.sum(support_list, axis=0)
-    Results_support_one_list = np.sum(s_vectors == 1, axis=1)
+    # Count the items the report actually supports (s_i(v) * y > 0): k+ when
+    # y > 0, d - k+ when y < 0 -- the same set the item features read.
+    Results_support_one_list = np.sum(support_list > 0, axis=1)
 
     return support_list, Results_support_one_list, ESTIMATE_DIST, ESTIMATE_DIST
 
