@@ -39,7 +39,7 @@ from multiprocessing import Pool
 from functools import partial
 
 from attacker_detector.data.generators.attacks import (
-    _olh_server_buckets, apa_quota, choose_server_apa_buckets)
+    _olh_server_buckets, apa_quota, choose_server_apa_buckets, perturb_OLH)
 from attacker_detector.data.generators.features import (
     extract_user_level_features_diffstats_style)
 from attacker_detector.data.generators.pca_graph import get_distribution_generator
@@ -76,7 +76,7 @@ def main():
 
     n, d, eps = args.n, args.domain, args.epsilon
     np.random.seed(args.seed)
-    get_distribution_generator(args.dataset)(n, d, seed=args.seed)  # same RNG path as the generator
+    X, _ = get_distribution_generator(args.dataset)(n, d, seed=args.seed)  # same RNG path as the generator
     targets = np.sort(np.random.choice(d, size=args.targets, replace=False))
     g = int(round(math.exp(eps))) + 1
     p = math.exp(eps) / (math.exp(eps) + g - 1)
@@ -87,8 +87,9 @@ def main():
     buckets = hash_all(n, g, d, args.processes)
     print(f"hashed {n} users x {d} items in {time.time() - t0:.0f}s (g={g}, m={m})")
 
-    # Genuine reports: the generator's benign users report bucket 0 (Y = 0).
-    genuine = (buckets == 0)
+    # Genuine reports: perturbed true buckets, as the generator builds them.
+    Y = perturb_OLH(X, np.arange(n), g, eps)
+    genuine = (buckets == Y[:, None].astype(np.uint8))
     fake_b = buckets[start:]
     subsets = np.array([np.random.choice(targets, args.splits, replace=False)
                         for _ in range(m)])

@@ -303,6 +303,26 @@ def process_attacker(i, n, ratio, target_set, g, domain, splits, h_ao, e, K_valu
     return index, vector
 
 
+def perturb_OLH(X, User_Seed, g, epsilon):
+    '''Genuine OLH reports (MDPA_LDP's perturb_ideal): user i hashes its true
+    item with its own seed and keeps that bucket with prob p - q, otherwise draws
+    a bucket uniformly from all g -- so the true bucket is reported with prob p
+    and each other bucket with q = 1 / (e^eps + g - 1).
+
+    Fake users' entries are computed too but never read: their reports are
+    replaced by the attack vectors.
+    '''
+    p = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
+    q = 1.0 / (math.exp(epsilon) + g - 1)
+    n = len(X)
+    Y = np.empty(n, dtype=np.int64)
+    for i in range(n):
+        Y[i] = xxhash.xxh3_64(str(int(X[i])).encode(), seed=int(User_Seed[i])).intdigest() % g
+    perturb = np.random.random_sample(n) > p - q
+    Y[perturb] = np.random.randint(0, g, size=int(perturb.sum()))
+    return Y
+
+
 def process_user_seeds(i, User_Seed_noattack, Y_Nattack, domain, g):
     local_estimate = np.zeros(domain)
     user_seed = User_Seed_noattack[i]

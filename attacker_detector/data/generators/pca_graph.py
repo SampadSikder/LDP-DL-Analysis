@@ -16,6 +16,7 @@ from .distributions import (
 )
 from .attacks import (
     perturb_OUE_multi,
+    perturb_OLH,
     HST_Server,
     HST_Users,
     build_support_list_1_OUE,
@@ -60,7 +61,7 @@ def generate_perturbed_data(
         g = int(round(math.exp(epsilon))) + 1
         p = math.exp(epsilon) / (math.exp(epsilon) + g - 1)
         User_Seed = np.arange(n)
-        Y = np.zeros(n)
+        Y = perturb_OLH(X, User_Seed, g, epsilon)
 
         if olh_setting == 'user':
             support_list, one_list, estimate_dist, _ = build_support_list_1_OLH(
