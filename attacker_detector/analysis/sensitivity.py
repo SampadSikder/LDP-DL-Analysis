@@ -101,6 +101,16 @@ def run_sensitivity_analysis(
 
     print("Calculating sensitivity metrics...")
 
+    for col_name, display_name, val, mask, slice_name in _iter_slices(config_array, oat_defaults):
+        results.append(_row(col_name, display_name, val, mask, slice_name))
+
+    return pd.DataFrame(results)
+
+
+def _iter_slices(config_array: np.ndarray, oat_defaults: Optional[dict] = None):
+    """Yield (param, display label, value, row mask, slice name) for every
+    per-parameter row of a sensitivity table. config_array rows are users
+    (run_sensitivity_analysis) or whole LDP runs (sensitivity_table_from_counts)."""
     # Named column indices (attacker_detector/data/dataset.py's _CONF_* constants)
     # so this stays correct if config.npy's column layout changes.
     _COL_MAP = {
@@ -120,7 +130,7 @@ def run_sensitivity_analysis(
         numeric = {p: config_array[:, _COL_MAP[p][0]].astype(np.float64)
                    for p in _OAT_PARAMS if p in oat_defaults}
         for p in numeric:
-            rest = np.ones(len(y_true_all), dtype=bool)
+            rest = np.ones(len(config_array), dtype=bool)
             for q, vals in numeric.items():
                 if q != p:
                     rest &= np.isclose(vals, float(oat_defaults[q]))
@@ -136,8 +146,50 @@ def run_sensitivity_analysis(
             if rest is not None:
                 mask &= rest
             if mask.any():
-                results.append(_row(col_name, display_name, val, mask, slice_name))
+                yield col_name, display_name, val, mask, slice_name
 
+
+def sensitivity_table_from_counts(
+    run_config: np.ndarray,
+    tp: np.ndarray,
+    fp: np.ndarray,
+    fn: np.ndarray,
+    tn: np.ndarray,
+    oat_defaults: Optional[dict] = None,
+) -> pd.DataFrame:
+    """Sensitivity table for detectors scored one LDP run at a time (FIAD,
+    Diffstats -- attacker_detector/baselines.py).
+
+    Args:
+        run_config:   (R, >= 7) str array, one row per run, in config.npy's
+                      column layout.
+        tp, fp, fn, tn: (R,) confusion counts of each run.
+        oat_defaults: as in run_sensitivity_analysis.
+
+    A slice's metrics come from its summed counts, so they are the metrics
+    run_sensitivity_analysis would report on the same users, in the same columns.
+    """
+    counts = np.stack([tp, fp, fn, tn], axis=1).astype(np.int64)
+
+    def _row(param_type, label, value, mask, slice_name):
+        TP, FP, FN, TN = (int(c) for c in counts[mask].sum(axis=0))
+        n = TP + FP + FN + TN
+        return {
+            'Parameter_Type':  param_type,
+            'Parameter_Label': label,
+            'Value':           value,
+            'Accuracy':  (TP + TN) / n if n else 0.0,
+            'Precision': TP / (TP + FP) if TP + FP else 0.0,
+            'Recall':    TP / (TP + FN) if TP + FN else 0.0,
+            'F1_Score':  2 * TP / (2 * TP + FP + FN) if TP else 0.0,
+            'Count':     n,
+            'Attackers': TP + FN,
+            'Slice':     slice_name,
+        }
+
+    results = [_row('overall', 'Overall', 'all', np.ones(len(counts), dtype=bool), 'all')]
+    for col_name, display_name, val, mask, slice_name in _iter_slices(run_config, oat_defaults):
+        results.append(_row(col_name, display_name, val, mask, slice_name))
     return pd.DataFrame(results)
 
 

@@ -25,6 +25,7 @@ from attacker_detector.data import (
     prepare_npy_data_by_dataset_type,
     prepare_npy_data_oat,
 )
+from attacker_detector.data.dataset import apply_feature_set_v3
 from attacker_detector.training import Trainer
 from attacker_detector.training.trainer import run_k_fold_cv, run_hp_search_cv
 from attacker_detector.analysis import run_sensitivity_analysis, plot_sensitivity_metric
@@ -100,9 +101,9 @@ def parse_args():
     parser.add_argument(
         '--model', '-m',
         type=str,
-        required=True,
+        default=None,
         choices=['mlp', 'gan', 'attention', 'ft_transformer'],
-        help='Model type to use'
+        help='Model type to use (required unless --baseline is given)'
     )
 
     parser.add_argument(
@@ -298,6 +299,14 @@ def parse_args():
         help='Keep only rows with this dataset_type (training-method none only)'
     )
     parser.add_argument(
+        '--feature-set',
+        choices=['stored', 'v3'],
+        default='stored',
+        help='stored = the columns in features.npy; v3 = block_projection, '
+             'block_overlap, one_deviation (median/IQR within each LDP run) and '
+             'excess_share, built from a v2 dataset at load time'
+    )
+    parser.add_argument(
         '--max-samples',
         type=int,
         default=None,
@@ -333,7 +342,37 @@ def parse_args():
              'threshold choices can be evaluated later without retraining'
     )
 
+    baselines = parser.add_argument_group(
+        'baselines',
+        'Score FIAD / Diffstats (MDPA_LDP) instead of training a model. The runs '
+        'of --data-path\'s design.json are simulated again (same generator, attack '
+        'and n) and filtered by --protocol / --dataset (or --test-dataset); each '
+        'method writes its own sensitivity_test_results.csv under -o/<method>/.'
+    )
+    baselines.add_argument(
+        '--baseline', nargs='+', choices=['fiad', 'diffstats'], default=None,
+        help='Baseline detector(s) to score; several share the same simulated runs'
+    )
+    baselines.add_argument(
+        '--baseline-runs', type=int, default=None,
+        help='Simulated runs per config (default: the config\'s held-out replicate '
+             'count, at least 1)'
+    )
+    baselines.add_argument(
+        '--baseline-processors', type=int, default=4,
+        help='Processes per simulated run, for the generator and for FIAD\'s '
+             'chunked itemset mining'
+    )
+
     args = parser.parse_args()
+
+    if args.baseline:
+        if not args.output_dir:
+            parser.error("--baseline requires --output-dir")
+        if args.baseline_runs is not None and args.baseline_runs < 1:
+            parser.error("--baseline-runs must be a positive integer")
+    elif args.model is None:
+        parser.error("--model is required unless --baseline is given")
 
     if args.dataset and args.training_method != 'none':
         parser.error("--dataset only applies to --training-method none")
@@ -367,11 +406,19 @@ def parse_args():
 def main():
     args = parse_args()
 
+    if args.baseline:
+        from attacker_detector.baselines import run_baselines
+        run_baselines(args)
+        return
+
     torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print(f"\nLoading dataset from: {args.data_path}")
     ds = load_npy_dataset(args.data_path)
+    if args.feature_set == 'v3':
+        # before any row filtering: per-run statistics need every report of a run
+        apply_feature_set_v3(ds)
 
     idx = np.arange(len(ds))
     if args.protocol:

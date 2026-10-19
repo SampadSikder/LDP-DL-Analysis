@@ -99,13 +99,25 @@ An empirically-estimated baseline (computed from the attacked reports themselves
 property — at high attacker ratios it shifts toward the attack, and anomaly scores can invert (attackers
 end up looking *less* anomalous than honest users). The analytic baseline can't be contaminated that way.
 
-**HST caveat.** `HST_Server`/`HST_User`'s `one_list` (attacks.py) is a count of `+1`s in each user's
-*public random sign vector* — unrelated to their actual report for `HST_Server`, and deliberately padded
-by attackers to mimic the benign count for `HST_User`. The 9 features below derived from `one_list` /
-the k-value baseline carry near-zero signal for HST specifically (measured AUC ≈ 0.50–0.57, vs. ≈ 0.6–0.9
-for the same features under OUE) — a property of those two protocols' generators, not a bug in feature
-extraction. Only the item-level features (`overlap_anomalous_items_ratio`, `max_item_freq_ratio`,
-`mean_item_freq_ratio`, `support_entropy_scaled`, `user_theoretical_deviation`) retain any signal there.
+**HST caveat.** The two HST generators in attacks.py compute `one_list` differently:
+
+- **`HST_Server`** counts the items the report actually supports (`s_i(v) · y > 0`). That is `k+` when
+  `y > 0` and `d − k+` when `y < 0`, the same set the item-level features read. Before commit `51a48b3` it
+  counted the `+1`s in the user's *public random sign vector*, which is unrelated to the report.
+- **`HST_User`** still counts the `+1`s in `s_i` (`HST_Users`, `np.sum(s_vectors == 1, axis=1)`). Fake
+  users always send `y = +c`, so for them this count equals the support size. For the genuine users who
+  send `y = −c` (about half), it equals `d − support size`. A model can see that mismatch by comparing a
+  `one_list` feature (`num_ones_scaled`, the `k_*` features) with a support-size feature
+  (`support_entropy_scaled`), and the mismatch marks the user as genuine. **`HST_User` results are
+  inflated by this label leak** until the count is changed to `np.sum(support_list > 0, axis=1)`, as in
+  `HST_Server`.
+
+Measured one feature at a time, the 9 features derived from `one_list` / the k-value baseline carry
+near-zero signal for HST (AUC ≈ 0.50–0.57, vs. ≈ 0.6–0.9 for the same features under OUE). This was
+measured with the old `HST_Server` count and has not been re-measured since the fix. The `HST_User` leak
+does not show up in that test, because it needs two features together. When features are used one at a
+time, only the item-level features (`overlap_anomalous_items_ratio`, `max_item_freq_ratio`,
+`mean_item_freq_ratio`, `support_entropy_scaled`, `user_theoretical_deviation`) keep any signal under HST.
 
 ### Domain-Invariant Scaling
 
@@ -441,6 +453,33 @@ Grid search is **not yet applied to `--training-method cross`/`three-way`'s val/
 | `sensitivity_test_results.csv` | Sensitivity by ε, ratio, target size, dataset type |
 | `sensitivity_eval_results.csv` | Sensitivity for eval set (three-way only) |
 | `sensitivity_*_*.png` | Sensitivity plots |
+
+### Baselines: FIAD and Diffstats
+
+`--baseline` scores the FIAD and Diffstats detectors from [MDPA_LDP](https://github.com/Marvin-huoshan/MDPA_LDP) (Li et al., CCS 2025) instead of training a model. The ports are `attacker_detector/FIAD.py` and `attacker_detector/DiffStats.py`.
+
+Both detectors need a whole run's support matrix, which the dataset does not keep. Baseline mode therefore simulates the runs listed in `design.json` again, with the same generator, attack and n. Each run is seeded like the dataset's held-out replicate, so the users' true items and the target set are the same. Perturbation and attack randomness is fresh.
+
+`--protocol` and `--dataset` (or `--test-dataset`) select the configs, the same way they do for training. FIAD needs `mlxtend`.
+
+```bash
+python main.py -d output/oat_apa_n500k/OUE --protocol OUE --dataset zipf \
+    --baseline fiad diffstats -o results/oat_apa_n500k/baselines/Zipf_OUE
+```
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--baseline` | `fiad`, `diffstats`, or both. When both are given, they share each simulated run. | None |
+| `--baseline-runs` | Simulated runs per config | the config's held-out replicate count (at least 1) |
+| `--baseline-processors` | Processes per simulated run, for the generator and for FIAD's chunked itemset mining (same result at any count) | 4 |
+
+Each method writes the following files to `-o/<method>/`:
+
+- `sensitivity_test_results.csv`: same columns and slices as the DL file. Metrics are pooled over the users of each slice.
+- `test_results.csv`: the overall row.
+- `baseline_runs.csv`: one row per run, with TP/FP/FN/TN, precision, recall, F1, FPR, FNR and seconds. Rows are appended as each run finishes, and a rerun skips runs already listed.
+
+`scripts/run_baselines.sh` loops this over every protocol and dataset of a data root. `scripts/plots/make_figures_v6.py --baselines measured` draws the results in place of the published curves.
 
 ## GNN Training (`main_gnn.py`)
 

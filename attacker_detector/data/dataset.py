@@ -188,6 +188,82 @@ def load_npy_dataset(data_dir: str) -> NpyDataset:
     return NpyDataset(features, labels, config, feature_names, norm_stats, design)
 
 
+FEATURE_NAMES_V3 = ['block_projection', 'block_overlap', 'one_deviation', 'excess_share']
+_V3_PER_RUN = ('block_projection', 'block_overlap', 'one_deviation')
+
+
+def apply_feature_set_v3(ds: NpyDataset) -> None:
+    """Replace ds.features with the cross-dataset feature set v3, in place.
+
+    Built from a v2 dataset's stored columns, so nothing is regenerated:
+      block_projection, block_overlap, one_deviation
+          centred on the run's median and scaled by its IQR -- every user is
+          measured against the other reports of the same LDP run, which removes
+          the per-dataset shifts (popularity curve, domain size) a single global
+          normalization leaves in
+      excess_share
+          share of the run's users reporting exactly the user's count k minus the
+          binomial share predicted for k. MGA-A fakes sit at ~beta on every
+          dataset; the domain-scaled k-features and freq_ratio do not transfer
+    A final global z-score only sets the scale the network sees.
+
+    Statistics use every report of a run (attackers included), as a server
+    would; call this before filtering rows.
+    """
+    from scipy.stats import binom
+    from config import DATASET_CONFIGS
+    from .generators.features import _protocol_params, _protocol_pq
+
+    names = list(ds.feature_names)
+    need = ('num_ones_scaled',) + _V3_PER_RUN
+    missing = [n for n in need if n not in names]
+    if missing or not ds.norm_stats:
+        raise ValueError(f"feature set v3 needs a v2 dataset with norm_stats.json; missing {missing}")
+    mean = np.asarray(ds.norm_stats['mean'], dtype=np.float64)
+    std = np.asarray(ds.norm_stats['std'], dtype=np.float64)
+
+    def raw(name, rows):
+        j = names.index(name)
+        return ds.features[rows, j].astype(np.float64) * std[j] + mean[j]
+
+    # one LDP run = one (dataset_type, experiment_id); integer key, no string joins
+    dataset_types = sorted(DATASET_CONFIGS)
+    dataset_code = np.full(len(ds), -1, dtype=np.int64)
+    for i, name in enumerate(dataset_types):
+        dataset_code[ds.config[:, _CONF_DATASET_TYPE] == name] = i
+    if (dataset_code < 0).any():
+        raise ValueError(f"feature set v3: dataset_type outside {dataset_types}")
+    run_key = ds.config[:, _CONF_EXPERIMENT_ID].astype(np.int64) * len(dataset_types) + dataset_code
+    run_ids, inverse = np.unique(run_key, return_inverse=True)
+    order = np.argsort(inverse, kind='stable')
+    bounds = np.cumsum(np.bincount(inverse, minlength=len(run_ids)))[:-1]
+
+    out = np.empty((len(ds), len(FEATURE_NAMES_V3)), dtype=np.float64)
+    for rows in np.split(order, bounds):
+        protocol = str(ds.config[rows[0], _CONF_PROTOCOL])
+        epsilon = float(ds.config[rows[0], _CONF_EPSILON])
+        domain = DATASET_CONFIGS[str(ds.config[rows[0], _CONF_DATASET_TYPE])]['domain']
+        for c, name in enumerate(_V3_PER_RUN):
+            x = raw(name, rows)
+            med = np.median(x)
+            iqr = np.subtract(*np.percentile(x, [75, 25]))
+            out[rows, c] = (x - med) / (iqr if iqr > 1e-9 else 1.0)
+        _, _, expected_ones = _protocol_params(protocol, epsilon, domain)
+        p_binomial = _protocol_pq(protocol, epsilon, domain)[3]
+        k = np.rint(raw('num_ones_scaled', rows) * expected_ones).astype(np.int64)
+        values, k_index, k_counts = np.unique(k, return_inverse=True, return_counts=True)
+        out[rows, 3] = (k_counts / len(rows) - binom.pmf(values, domain, p_binomial))[k_index]
+
+    mu, sd = out.mean(axis=0), out.std(axis=0)
+    sd[sd < 1e-12] = 1.0
+    ds.features = ((out - mu) / sd).astype(np.float32)
+    ds.feature_names = list(FEATURE_NAMES_V3)
+    ds.norm_stats = {'feature_names': list(FEATURE_NAMES_V3), 'mean': mu.tolist(),
+                     'std': sd.tolist(), 'derived_from': 'v2', 'runs': int(len(run_ids))}
+    print(f"Feature set v3: {FEATURE_NAMES_V3} from {len(run_ids)} LDP runs "
+          f"(per-run median/IQR; excess_share = observed - binomial share at k)")
+
+
 
 def prepare_npy_data(
     ds: NpyDataset,
