@@ -112,7 +112,7 @@ class ClassifierRemoval(Method):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 opt.step()
-                tot += float(loss) * len(b)
+                tot += float(loss.detach()) * len(b)
             self.model.eval()
             with torch.no_grad():       # batched: one pass over all rows overflows MPS tensor limits
                 vs = sum(float((bce(self.model(Xvt[i:i + 8192]).squeeze(-1), yvt[i:i + 8192])

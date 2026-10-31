@@ -2,12 +2,15 @@
 # Full SR/PM mean-variance benchmark on the lab server. Every step is resumable:
 # re-run the same command after a crash or kill and finished work is skipped.
 #
-#   nohup bash scripts/mean_variance/run_server.sh all > run_mv_all.log 2>&1 &
+#   nohup bash scripts/mean_variance/run_server.sh all > /dev/null 2>&1 &
+#   tail -f results/mean_variance_server/run_server.log          # progress
 #   bash scripts/mean_variance/run_server.sh preflight         # one stage
 #   bash scripts/mean_variance/run_server.sh paper kmeans      # several stages, in order
 #
 # Stages (`all` order):
-#   preflight  env + GPU check, dataset files, unit tests, data audit (warms the source cache)
+#   preflight  packages, CUDA check (stage `cuda`), dataset files, unit tests, data audit (warms the source cache)
+#   cuda       only the CUDA check: GPUs visible, kernels run, benchmark methods pick and train on cuda,
+#              one GPU per shard (scripts/mean_variance/check_cuda.py)
 #   smoke      small end-to-end run of every method on GPU (pipeline check, not a result)
 #   paper      attack validation at paper scale (7 configs), feasibility maps, budget curves  [CPU]
 #   kmeans     paper Sec. 8.1 k-means verification: rate, beta, mean, variance sweeps         [CPU]
@@ -20,18 +23,24 @@
 #   SHARDS      evaluate processes for budget/breadth (default 2 per GPU, capped by RAM/32 GB and CPUs/8)
 #   THREADS     BLAS/torch threads per shard (default CPUs / (2 * SHARDS))
 #   EPS_LIST    eps values for feasibility maps and budget curves (default "0.1 1 2 4 6")
+#   RESULTS     output folder (default results/mean_variance_server; kept apart from local results/mean_variance)
 #   SKIP_TESTS=1, ALLOW_CPU=1 (run even if torch cannot see the GPUs)
-# Logs: results/mean_variance/logs/<step>.log; this script prints one line per step.
+# Everything this script produces goes under $RESULTS:
+#   run_server.log                  this script's console output (one line per step)
+#   logs/<step>.log                 full output of each step
+#   <experiment>/                   one folder per config (rounds, checkpoints, per_round, aggregate.csv, figures)
+#   feasibility/, budget_curves/, provenance_<source>.json
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 
 PY=${PY:-/home/boby/miniconda3/envs/attacker-detector/bin/python}
 [[ -x $PY ]] || PY=$(command -v python)
-R=results/mean_variance
+R=${RESULTS:-results/mean_variance_server}
 LOGS=$R/logs
 C=configs/mean_variance
 EPS_LIST=${EPS_LIST:-"0.1 1 2 4 6"}
 mkdir -p "$LOGS"
+exec > >(tee -a "$R/run_server.log") 2>&1       # console output also kept inside $R
 
 NGPU=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || true)
 NCPU=$(nproc)
@@ -46,7 +55,7 @@ THREADS=${THREADS:-$(( NCPU / (2 * SHARDS) ))}
 (( THREADS < 1 )) && THREADS=1
 
 say () { echo "[$(date '+%F %T')] $*"; }
-run () { "$PY" scripts/mean_variance/run.py "$@"; }
+run () { "$PY" scripts/mean_variance/run.py "$@" --results-root "$R"; }
 
 # job <name> <cmd...>: run quietly into $LOGS/<name>.log (appended), one status line
 job () {
@@ -63,7 +72,7 @@ eval_sharded () {
   for (( i = 0; i < n; i++ )); do
     gpu=""; (( NGPU > 0 )) && gpu=$(( i % NGPU ))
     CUDA_VISIBLE_DEVICES=$gpu OMP_NUM_THREADS=$THREADS MKL_NUM_THREADS=$THREADS OPENBLAS_NUM_THREADS=$THREADS \
-      "$PY" scripts/mean_variance/run.py evaluate --config "$cfg" --shard "$i/$n" \
+      "$PY" scripts/mean_variance/run.py evaluate --config "$cfg" --shard "$i/$n" --results-root "$R" \
       >> "$LOGS/${name}_evaluate_shard$i.log" 2>&1 &
     pids+=($!)
   done
@@ -89,20 +98,20 @@ wait_all () { local p fail=0; for p in "$@"; do wait "$p" || fail=1; done; retur
 stage_preflight () {
   say "python $PY | GPUs $NGPU | CPUs $NCPU | RAM ${RAM_GB} GB | shards $SHARDS x $THREADS threads"
   (( NGPU > 0 )) && nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader | sed 's/^/    /'
-  NGPU=$NGPU ALLOW_CPU=${ALLOW_CPU:-0} "$PY" - <<'EOF' || return 1
-import importlib.util, os, sys
+  "$PY" - <<'EOF' || return 1
+import importlib.util, sys
 need = ['numpy', 'pandas', 'scipy', 'sklearn', 'matplotlib', 'torch', 'yaml', 'psutil', 'pyarrow', 'catboost']
 missing = [m for m in need if importlib.util.find_spec(m) is None]
 if missing:
     sys.exit(f"    missing packages: {missing}\n    install: {sys.executable} -m pip install "
              + ' '.join({'yaml': 'pyyaml', 'sklearn': 'scikit-learn'}.get(m, m) for m in missing))
-import torch
-from attacker_detector.mean_variance.methods.removal import device_for
-print(f"    torch {torch.__version__}, cuda {torch.version.cuda}, visible GPUs {torch.cuda.device_count()}, "
-      f"auto device -> {device_for('auto')}")
-if int(os.environ['NGPU']) > 0 and not torch.cuda.is_available() and os.environ['ALLOW_CPU'] != '1':
-    sys.exit("    nvidia-smi sees GPUs but torch does not (CPU-only torch build?). Set ALLOW_CPU=1 to run anyway.")
+print("    packages ok")
 EOF
+  if [[ ${ALLOW_CPU:-0} == 1 ]]; then
+    stage_cuda || say "WARNING: CUDA check failed; ALLOW_CPU=1, so neural methods will run on CPU"
+  else
+    stage_cuda || return 1
+  fi
   local f bad=0
   for f in datasets/mean_variance/taxi/green_tripdata_2020-12.parquet \
            datasets/mean_variance/income/psam_pusa.csv datasets/mean_variance/income/psam_pusb.csv \
@@ -115,6 +124,16 @@ EOF
   fi
   job audit_data run audit-data     # also builds datasets/mean_variance/.cache before parallel jobs start
   grep -h '^{' "$LOGS/audit_data.log" | tail -3 | cut -c1-160 | sed 's/^/    /'
+}
+
+# CUDA detection by the benchmark code itself (see check_cuda.py); results on screen, warnings in the log
+stage_cuda () {
+  say "start  cuda_check"
+  "$PY" scripts/mean_variance/check_cuda.py --config "$C/breadth.yaml" 2>> "$LOGS/cuda_check.log" \
+    | tee -a "$LOGS/cuda_check.log" | sed 's/^/    /'
+  local s=${PIPESTATUS[0]}
+  (( s == 0 )) && say "done   cuda_check" || say "FAILED cuda_check -- see $LOGS/cuda_check.log"
+  return "$s"
 }
 
 stage_smoke () { grid "$C/smoke.yaml" smoke; }
@@ -162,7 +181,7 @@ stage_all () {
 }
 
 # ------------------------------------------------------------------ main
-(( $# )) || { sed -n '2,24p' "$0"; exit 1; }
+(( $# )) || { awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0"; exit 1; }
 status=0
 for s in "$@"; do
   declare -F "stage_$s" > /dev/null || { echo "unknown stage: $s"; exit 1; }

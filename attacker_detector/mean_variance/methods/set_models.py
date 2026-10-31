@@ -200,7 +200,7 @@ class SetRecovery(Method):
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 opt.step()
-                tot += float(loss) * len(batch[0])
+                tot += float(loss.detach()) * len(batch[0])
             vu = self._val_utility(va, scales, rng)
             self.history.append({'epoch': epoch, 'train_loss': tot / len(tr), 'val_utility': vu})
             if vu < best - 1e-9:

@@ -38,7 +38,11 @@ def check(name, fn):
         print(f"PASS  {name:9} {msg or ''} ({time.perf_counter() - t0:.1f}s)", flush=True)
     except Exception as e:                       # report every check, then exit non-zero
         FAILED.append(name)
-        print(f"FAIL  {name:9} {type(e).__name__}: {e}", flush=True)
+        hint = ''
+        if isinstance(e, ModuleNotFoundError):   # env problem, not a CUDA problem
+            pkg = {'yaml': 'pyyaml', 'sklearn': 'scikit-learn'}.get(e.name, e.name)
+            hint = f"  -> missing package, not a CUDA problem: {sys.executable} -m pip install {pkg}"
+        print(f"FAIL  {name:9} {type(e).__name__}: {e}{hint}", flush=True)
 
 
 def nvidia_smi_count():
