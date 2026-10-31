@@ -133,6 +133,8 @@ def transfer_matrix(agg, value: str, filters: dict, path_no_ext: str, title: str
         d = d[d[k] == v]
     g = d.groupby(['method', 'source', 'train_sources'])[value].mean().reset_index()
     dests = sorted(g['source'].unique())
+    if not dests:
+        return
     fig, axes = _axes(len(dests), title)
     for ax, dest in zip(axes, dests):
         sub = g[g.source == dest]

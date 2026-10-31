@@ -114,7 +114,10 @@ def cmd_report(cfg):
     if res.empty:
         print("no results")
         return
-    agg = aggregate(res)
+    budget = 'budget_mode' in res and (res['budget_mode'] == 'mmin_multiple').any()
+    # budget runs have beta = 0 everywhere (m = factor * m_min): split cells by factor instead
+    agg = aggregate(res, by=('partition', 'train_sources', 'source', 'protocol', 'epsilon', 'beta', 'attack', 'method')
+                    + (('budget_factor',) if budget else ()))
     agg.to_csv(os.path.join(od, 'aggregate.csv'), index=False)
     res.groupby(['method', 'kind', 'partition']).agg(rounds=('round_id', 'nunique'),
                                                      mse_mean=('sq_err_mean', 'mean'),
@@ -134,11 +137,11 @@ def cmd_report(cfg):
                 plots.heatmaps(within, val, {'protocol': protocol}, os.path.join(fig_dir, f'heat_{val}_{protocol}'),
                                f"{protocol}, within-source: {val} by epsilon x beta", inputs)
         for val in ('mse_mean', 'mse_var', 'ag_mean', 'ag_var'):
-            plots.transfer_matrix(agg[agg.beta > 0], val, {'protocol': protocol},
+            plots.transfer_matrix(agg[agg.attack != 'none'], val, {'protocol': protocol},
                                   os.path.join(fig_dir, f'transfer_{val}_{protocol}'),
                                   f"{protocol}: {val}, within vs cross vs multi-source", inputs)
     plots.runtime_bars(res, os.path.join(fig_dir, 'runtime'), "runtime and memory per method", inputs)
-    if 'budget_mode' in res and (res['budget_mode'] == 'mmin_multiple').any():
+    if budget:
         b = res[res['budget_mode'] == 'mmin_multiple']
         for protocol in cfg['protocols']:
             within = b[(b.protocol == protocol) & (b.train_sources == b.source)]
