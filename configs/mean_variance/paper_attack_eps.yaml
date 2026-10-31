@@ -1,0 +1,18 @@
+# Fig. 10 analogue: epsilon sweep, targets mu_t1 / sigma_t1^2, beta = 0.1. Attack validation only.
+experiment: paper_attack_eps
+protocols: [SR, PM]
+sources: [taxi, income]
+epsilon: [0.1, 1.0, 2.0, 4.0, 6.0]
+beta: [0.1]
+attacks: [IPA, OPA]
+targets: [m1v1]
+rounds: {all: 100}
+sizes: [full]
+size_mode: fixed_genuine
+plain_populations: true
+target_mode: absolute
+square_mode: normalized
+knowledge_regime: compromised
+knowledge_h: 1000
+n_e_rule: sig2
+pm_spread_ratio: 0.25

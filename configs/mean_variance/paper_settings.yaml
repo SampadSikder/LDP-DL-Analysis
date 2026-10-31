@@ -1,0 +1,82 @@
+# Settings from Li et al., "Fine-grained Poisoning Attack to Local Differential
+# Privacy Protocols for Mean and Variance Estimation", USENIX Security 2023.
+# Every value is classified:
+#   paper-stated            printed in the paper (location given)
+#   inferred-from-figure    read from a figure / table, or reproduced from printed numbers
+#   proposed-extension      ours; not in the paper
+# Axis ticks do not establish every experimental point.
+
+protocol:
+  mechanisms: {value: [SR, PM], class: paper-stated, where: "Sec. 2.2.1, 2.2.2"}
+  group_split: {value: "uniform random halves; g1 reports x, g2 reports x^2", class: paper-stated, where: "Sec. 2.2.1"}
+  g2_query:
+    value: normalized     # normalise x, then square (x~1^2 in [0, 1], rescaled to [-1, 1])
+    alternatives: [raw]   # Sec. 2.2.1 text: square original x, then normalise over [lo2, hi2]
+    class: inferred-from-figure
+    where: "Table 3 S(2) and Sec. 5 use x~1^2; Taxi attack validation reproduces the Fig. 5-6 variance-MSE level (~9e-5) only with this convention (raw gives ~1e-3, ~10x); Sec. 2.2.1 text describes raw"
+  variance_estimate: {value: "E(x^2) - E(x)^2, unclipped", class: paper-stated, where: "Sec. 2.2.1"}
+
+attacker:
+  beta_definition: {value: "m / (n + m)", class: paper-stated, where: "Table 1, Sec. 7.1"}
+  caption_variant: {value: "m = 0.1 n", class: paper-stated, where: "captions of Figs. 5-10", note: "differs from beta = 0.1; kept only as a named reproduction variant"}
+  knowledge_sample_h: {value: 1000, class: paper-stated, where: "Sec. 7.1 (1,000 random users, kept genuine)"}
+  n_e: {value: {taxi: 80000, income: 2400000, retirement: 100000}, class: paper-stated, where: "Table 4"}
+  fixed_knowledge_table4:
+    class: paper-stated
+    where: "Table 4 S*_e(1), S*_e(2), n*_e (one fixed 1,000-user sample)"
+    as_errors_vs_truth: {taxi: {dS1_n: -131.5, dS2_n: 1217.0, dn: -3130}, income: {dS1_n: 5068.1, dS2_n: -6837.0, dn: 9797}}
+    note: "use knowledge_regime=exact with these errors to reproduce the paper's fixed knowledge; the default draws a fresh compromised sample per round (more knowledge noise)"
+  ipa_solver: {value: "Adam, lr 0.001, 10,000 iterations (PyTorch)", class: paper-stated, where: "Sec. 4.1 footnote"}
+  ipa_solver_default_here: {value: closed_form, class: proposed-extension, note: "exact interpolation of Thm. 1 solutions; projected Adam available as solver=adam"}
+  opa_pm_spread: {value: "random perturbation that keeps the sum and the range", class: paper-stated, where: "Sec. 4.2.2", note: "sampler unspecified"}
+  opa_pm_spread_ratios: {value: [0.0, 0.05, 0.10, 0.25, 0.50, 1.0], class: proposed-extension, note: "nominal half-width / PM plateau width (s - 1)"}
+  sum_rule: {value: paper, alternatives: [group_aware], class: paper-stated, where: "Eqs. 4-7"}
+
+defaults:
+  epsilon: {value: 1.0, class: paper-stated, where: "captions of Figs. 2-9, 11-12"}
+  beta: {value: 0.1, class: paper-stated, where: "Sec. 7.1"}
+  repetitions: {value: 100, class: paper-stated, where: "Sec. 7.1 (N = 100)"}
+  kmeans_subsets: {value: 5000, class: paper-stated, where: "Sec. 8.1 results"}
+
+sweeps:
+  epsilon: {value: [0.1, 1, 2, 4, 6], class: inferred-from-figure, where: "Fig. 10 labelled points"}
+  beta: {value: [0.05, 0.25, 0.50, 0.75], class: inferred-from-figure, where: "Fig. 11 axis ticks", note: "range 0.05-0.8 stated in Sec. 7.2.4; interior points not established"}
+  kmeans_sampling_rate: {value: [0.1, 0.3, 0.5, 0.7, 0.9], class: inferred-from-figure, where: "Fig. 12 axis ticks"}
+
+targets:   # benchmark scale [-1, 1]; middle entries are the rounded true moments
+  taxi:       {mean: [0.06, -0.022, -0.06], variance: [0.33, 0.34, 0.40], class: paper-stated, where: "Table 4"}
+  income:     {mean: [-0.92, -0.93, -0.94], variance: [0.005, 0.007, 0.009], class: paper-stated, where: "Table 4"}
+  retirement: {mean: [-0.86, -0.87, -0.88], variance: [0.020, 0.025, 0.030], class: paper-stated, where: "Table 4"}
+  breadth_target_mode:
+    value: offset
+    class: proposed-extension
+    note: "mean: round's genuine mean + (printed - printed middle); variance: round's genuine variance * printed / printed middle; middle = preserve the round's genuine moment"
+
+datasets:
+  taxi:
+    source: "NYC TLC green taxi trip records, December 2020"
+    column: {value: DOLocationID, class: inferred-from-figure, where: "Table 3 n, mean, variance, S1, S2 reproduced (paper text says 'mileage')"}
+    filter: {value: none, class: inferred-from-figure}
+    domain: {value: [1, 265], class: inferred-from-figure, where: "Table 3 S1 = -2,194 reproduced with [1, 265]; TLC zone IDs run 1-265"}
+    table3: {n: 83130, mean_n: -0.022, var_n: 0.34, S1_n: -2194, S2_n: 28362, raw_mean: 129, raw_var: 5932}
+  income:
+    source: "2019 ACS 1-year PUMS person files (psam_pusa.csv, psam_pusb.csv); paper cites IPUMS"
+    column: {value: PINCP, class: inferred-from-figure, where: "Table 3 n and S1 reproduced exactly"}
+    filter: {value: "PINCP > 0, no ADJINC adjustment", class: inferred-from-figure}
+    domain: {value: [1, 1629000], class: inferred-from-figure, where: "Table 3 S1 = -2,239,154 reproduced"}
+    table3: {n: 2390203, mean_n: -0.93, var_n: 0.007, S1_n: -2239154, S2_n: 2115289, raw_mean: 51473, raw_var: 4.8e9}
+  retirement:
+    source: "SF Employee Compensation (Kaggle san-francisco/sf-employee-compensation, Jan 2021 snapshot)"
+    column: {value: Retirement, class: proposed-extension, note: "no subset of the file reproduces Table 3; substitute, see deviations.md"}
+    filter: {value: "Year Type == Fiscal and Year in {2019, 2020}", class: proposed-extension}
+    domain: {value: [-2000, 125000], class: proposed-extension, note: "declared outward rounding of the substitute's range [-1604, 121953]"}
+    table3: {n: 97220, mean_n: -0.87, var_n: 0.025, S1_n: -85000, S2_n: 76752, raw_mean: 46249, raw_var: 3.3e9}
+
+budget_stage:   # computed for every attacked round before any attack is generated
+  target_second_moment: {value: "q_t = mu_t^2 + sigma_t^2", class: paper-stated, where: "Eq. 5 (slack E[mu^2] -> mu_t^2)"}
+  m_min: {value: "min{m : both target-moment constraints feasible}", class: proposed-extension, note: "integer search with a local recheck; attacker's permitted estimates for planning, an exact-information value recorded as oracle diagnostic"}
+  beta_min: {value: "m_min / (n + m_min)", class: proposed-extension, note: "n = attacker's n_e for planning; true n for the oracle diagnostic"}
+  planned_allocation: {value: "m_1 = ceil(m/2), m_2 = floor(m/2)", class: proposed-extension, note: "paper plans with m/2 (Sec. 5.1); the realized server split can differ -> allocation_infeasible"}
+  checks: {value: {IPA: "joint Sum y / Sum y^2 (Thm. 1)", OPA-SR: "integer +-1 counts per group", OPA-PM: "per-group support +-s m_g, spread room"}, class: proposed-extension, note: "derived from the implemented aggregation, not the printed Eqs. 10-13"}
+  budget_ladder: {value: [1.0, 1.1, 1.25, 1.5, 2.0], class: proposed-extension, note: "m = ceil(f m_min), rechecked; configs/mean_variance/budget_sweep.yaml; separate from paper settings"}
+  below_budget_evaluation: {value: [0.5, 0.75, 0.9], class: proposed-extension, note: "saturated best effort, status below_budget; configs/mean_variance/below_budget.yaml; separately labelled"}

@@ -83,6 +83,13 @@ results/
 outputs/
 output/
 checkpoints/
+archive_*/
+*.npy
+*.npz
+*.tgz
+
+# Run logs from the server jobs
+run_*.log
 
 # Data files
 *.csv
@@ -94,3 +101,25 @@ datasets/
 *.jpg
 *.jpeg
 *.pdf
+
+.mcp.json
+
+# CCE (code-context-engine)
+# CCE local cache (per-machine, not for version control)
+.cce/
+# Claude Code local settings written by cce init
+.claude/settings.local.json
+
+# --- mean/variance benchmark (attacker_detector/mean_variance) ---
+# Generated outputs already ignored above: results/ (rounds, checkpoints, per-round CSVs,
+# figures), datasets/ (raw files and datasets/mean_variance/.cache), *.npz, *.csv, *.png.
+# One-off configs (timing pilot, pipeline check, Taxi-only copy of paper_attack_default):
+configs/mean_variance/pilot.yaml
+configs/mean_variance/smoke_shift_eps2.yaml
+configs/mean_variance/paper_attack_default_taxi.yaml
+# Interrupted-write and backup leftovers
+*.tmp.npz
+*.bak
+# Local tool settings and scratch notes
+.claude/
+context.md

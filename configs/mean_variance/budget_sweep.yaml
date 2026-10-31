@@ -1,0 +1,28 @@
+# Proposed extension (not a paper setting): budgets around the minimum. For each round,
+# m_min is computed from the attacker's estimates for that round's target, then
+# m = ceil(f * m_min) for f in the ladder, rechecked at the rounded budget. The genuine
+# population is fixed (n = 4,096) and the realized beta is recorded. Targets exclude the
+# preserve-both cell (m_min ~ 0). Tests whether near-minimum budgets help or hurt
+# detection and recovery.
+experiment: budget_sweep
+protocols: [SR, PM]
+sources: [taxi, income, retirement]
+epsilon: [1.0]
+attacks: [IPA, OPA]
+targets: [m1v1, m3v3, m1v3, m3v1]
+rounds: {train: 12, val: 4, test: 10}
+sizes: [4096]
+size_mode: fixed_genuine
+budget_sweep: {factors: [1.0, 1.1, 1.25, 1.5, 2.0], below_budget: skip}
+target_mode: offset
+square_mode: normalized
+knowledge_regime: compromised
+knowledge_h: 1000
+n_e_rule: sig2
+pm_spread_ratios: [0.05, 0.10, 0.25, 0.50, 1.0]
+methods: [standard, constant, oracle_removal, kmeans, mlp_removal, deepsets_recovery]
+seeds: [0]
+multi_source: false
+kmeans_subsets: 5000
+classifier: {epochs: 15, reports_per_round: 512, patience: 4}
+neural: {epochs: 20, token_cap: 1024, patience: 5}

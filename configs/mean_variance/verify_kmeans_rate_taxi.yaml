@@ -1,0 +1,23 @@
+# k-means defense verification, Fig. 12 (left) analogue: Taxi, full population (n = 83,130), eps 1,
+# beta 0.1, targets mu_t1 / sigma_t1^2 (absolute), Table 4 fixed attacker knowledge, 100 repetitions,
+# sampling rate r in 0.1..0.9, 5,000 subsets. AG against the genuine moments, paired per round.
+experiment: verify_kmeans_rate_taxi
+protocols: [SR, PM]
+sources: [taxi]
+epsilon: [1.0]
+beta: [0.1]
+attacks: [IPA, OPA]
+targets: [m1v1]
+rounds: {all: 100}
+sizes: [full]
+size_mode: fixed_genuine
+plain_populations: true
+target_mode: absolute
+square_mode: normalized
+knowledge_regime: exact
+dS1_n: -131.5
+dS2_n: 1217.0
+dn: -3130
+pm_spread_ratio: 0.25
+kmeans_subsets: 5000
+kmeans_rates: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]

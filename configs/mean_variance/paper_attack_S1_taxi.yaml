@@ -1,0 +1,16 @@
+# Fig. 7 analogue (Taxi): attacker error in S_e(1) (benchmark-scale sum), targets mu_t1 / sigma_t1^2.
+experiment: paper_attack_S1_taxi
+protocols: [SR, PM]
+sources: [taxi]
+epsilon: [1.0]
+attacks: [IPA, OPA]
+rounds: {all: 100}
+sizes: [full]
+size_mode: fixed_genuine
+plain_populations: true
+target_mode: absolute
+square_mode: normalized
+knowledge_regime: exact
+pm_spread_ratio: 0.25
+beta: [0.1]
+sweep: {param: dS1_n, values: [-500, -250, 0, 250, 500], target: m1v1}

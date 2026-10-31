@@ -11,6 +11,9 @@ dependencies:
   - matplotlib
   - seaborn
   - tqdm
+  - pyarrow   # mean_variance: Taxi parquet
+  - pyyaml
+  - psutil
   - pip
   - pip:
     - torch
@@ -20,4 +23,5 @@ dependencies:
     #- --extra-index-url https://download.pytorch.org/whl/cpu  # cpuonly # without gpu
     - xxhash
     - mlxtend  # FIAD baseline (fpgrowth)
+    - catboost  # mean_variance: CatBoost recovery baseline
     - torch-geometric

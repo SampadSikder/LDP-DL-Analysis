@@ -1,0 +1,16 @@
+# Fig. 9 analogue (Taxi): attacker error in n_e.
+experiment: paper_attack_ne_taxi
+protocols: [SR, PM]
+sources: [taxi]
+epsilon: [1.0]
+attacks: [IPA, OPA]
+rounds: {all: 100}
+sizes: [full]
+size_mode: fixed_genuine
+plain_populations: true
+target_mode: absolute
+square_mode: normalized
+knowledge_regime: exact
+pm_spread_ratio: 0.25
+beta: [0.1]
+sweep: {param: dn, values: [-6000, -3000, 0, 3000, 6000], target: m1v1}

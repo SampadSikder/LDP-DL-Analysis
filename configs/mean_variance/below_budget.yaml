@@ -1,0 +1,26 @@
+# SEPARATELY LABELLED below-budget evaluation (proposed extension): m = ceil(f * m_min) with f < 1,
+# so the target is out of reach; fakes send their most extreme admissible reports toward the
+# target (status below_budget). Test split only, scored with frozen budget_sweep checkpoints.
+# Never mixed with the paper settings or the main benchmark.
+experiment: below_budget
+protocols: [SR, PM]
+sources: [taxi, income, retirement]
+epsilon: [1.0]
+attacks: [IPA, OPA]
+targets: [m1v1, m3v3, m1v3, m3v1]
+rounds: {train: 12, val: 4, test: 10}
+sizes: [4096]
+size_mode: fixed_genuine
+budget_sweep: {factors: [0.5, 0.75, 0.9], below_budget: saturate}
+target_mode: offset
+square_mode: normalized
+knowledge_regime: compromised
+knowledge_h: 1000
+n_e_rule: sig2
+pm_spread_ratios: [0.05, 0.10, 0.25, 0.50, 1.0]
+methods: [standard, constant, oracle_removal, kmeans, mlp_removal, deepsets_recovery]
+seeds: [0]
+multi_source: false
+kmeans_subsets: 5000
+classifier: {epochs: 15, reports_per_round: 512, patience: 4}
+neural: {epochs: 20, token_cap: 1024, patience: 5}
