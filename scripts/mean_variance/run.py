@@ -32,10 +32,15 @@ from attacker_detector.mean_variance.validation import (attack_validation, budge
                                                        kmeans_verification)
 
 RESULTS_ROOT = 'results/mean_variance'
+_ROOT_OVERRIDE = None          # --results-root: every output of this process goes under it
+
+
+def results_root(cfg=None):
+    return _ROOT_OVERRIDE or (cfg or {}).get('results_root', RESULTS_ROOT)
 
 
 def out_dir(cfg):
-    return os.path.join(cfg.get('results_root', RESULTS_ROOT), cfg['experiment'])
+    return os.path.join(results_root(cfg), cfg['experiment'])
 
 
 def cmd_audit(args):
@@ -49,8 +54,8 @@ def cmd_audit(args):
         prov = r.pop('provenance')
         rows.append(r)
         print(json.dumps({k: (round(v, 6) if isinstance(v, float) else v) for k, v in r.items()}))
-        os.makedirs(RESULTS_ROOT, exist_ok=True)
-        with open(os.path.join(RESULTS_ROOT, f'provenance_{s}.json'), 'w') as f:
+        os.makedirs(results_root(), exist_ok=True)
+        with open(os.path.join(results_root(), f'provenance_{s}.json'), 'w') as f:
             json.dump({**prov, 'stats': r}, f, indent=1)
 
 
@@ -159,12 +164,16 @@ def main():
     ap.add_argument('--splits', nargs='+', default=['train', 'val', 'test'])
     ap.add_argument('--methods', nargs='+')
     ap.add_argument('--sources', nargs='+')
+    ap.add_argument('--results-root', help=f"folder for every output (default {RESULTS_ROOT}; "
+                                           "overrides a config's results_root)")
     args = ap.parse_args()
+    global _ROOT_OVERRIDE
+    _ROOT_OVERRIDE = args.results_root
     if args.command == 'audit-data':
         return cmd_audit(args)
     if args.command == 'feasibility-maps':
         out = feasibility_maps(args.sources or list(SOURCES), args.epsilon,
-                               os.path.join(RESULTS_ROOT, 'feasibility'))
+                               os.path.join(results_root(), 'feasibility'))
         print(out.groupby(['source', 'attack'])['beta_min'].describe().to_string())
         return
     if args.command == 'evaluate-frozen':
@@ -176,7 +185,7 @@ def main():
         print(f"frozen evaluations written: {n}")
         return
     if args.command == 'budget-curves':
-        out_d = os.path.join(RESULTS_ROOT, 'budget_curves')
+        out_d = os.path.join(results_root(), 'budget_curves')
         df = budget_curves(args.sources or list(SOURCES), args.epsilon, out_d)
         plots.budget_curves_plot(df, os.path.join(out_d, f'beta_min_curves_eps{args.epsilon:g}'),
                                  f'minimum attacker fraction, eps {args.epsilon:g}', [f'budget_curves_eps{args.epsilon:g}.csv'])
