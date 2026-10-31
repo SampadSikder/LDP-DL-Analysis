@@ -142,6 +142,24 @@ class TestMethods(unittest.TestCase):
             self.assertTrue(-1 <= a.mean_raw <= 1 and 0 <= a.var_raw <= 1 - a.mean_raw ** 2 + 1e-7)
 
 
+class TestDevice(unittest.TestCase):
+    def test_auto_prefers_cuda_then_mps_then_cpu(self):
+        from unittest import mock
+        from attacker_detector.mean_variance.methods.removal import device_for
+        with mock.patch('torch.cuda.is_available', return_value=True), \
+             mock.patch('torch.backends.mps.is_available', return_value=True):
+            self.assertEqual(device_for('auto').type, 'cuda')
+            self.assertEqual(ClassifierRemoval('mlp').device.type, 'cuda')
+            self.assertEqual(SetRecovery('deepsets').device.type, 'cuda')
+        with mock.patch('torch.cuda.is_available', return_value=False), \
+             mock.patch('torch.backends.mps.is_available', return_value=True):
+            self.assertEqual(device_for('auto').type, 'mps')
+        with mock.patch('torch.cuda.is_available', return_value=False), \
+             mock.patch('torch.backends.mps.is_available', return_value=False):
+            self.assertEqual(device_for('auto').type, 'cpu')
+        self.assertEqual(device_for('cpu').type, 'cpu')         # explicit choice wins
+
+
 class TestCheckpoints(unittest.TestCase):
     def test_frozen_round_trip(self):
         import tempfile, shutil

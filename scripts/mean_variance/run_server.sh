@@ -130,7 +130,7 @@ EOF
 stage_cuda () {
   say "start  cuda_check"
   "$PY" scripts/mean_variance/check_cuda.py --config "$C/breadth.yaml" 2>> "$LOGS/cuda_check.log" \
-    | tee -a "$LOGS/cuda_check.log" | sed 's/^/    /'
+    | tee -a "$LOGS/cuda_check.log" | while IFS= read -r l; do echo "    $l"; done   # unbuffered, unlike sed
   local s=${PIPESTATUS[0]}
   (( s == 0 )) && say "done   cuda_check" || say "FAILED cuda_check -- see $LOGS/cuda_check.log"
   return "$s"

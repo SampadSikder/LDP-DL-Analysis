@@ -92,8 +92,12 @@ class TestRounds(unittest.TestCase):
         self.assertNotEqual(a.meta['checksum'], c.meta['checksum'])
 
     def test_attack_variants_share_genuine_reports(self):
-        a = generate_round(_spec(attack='OPA', target='m1v3'), self.pop, self.printed)
-        b = generate_round(_spec(attack='IPA', target='m3v1', spread_ratio=None), self.pop, self.printed)
+        # beta 0.3: IPA m3v1 needs ~0.10 even with exact knowledge, so the attack is generated whatever
+        # the attacker's random 1,000-user sample (at beta 0.1 it hinged on that draw)
+        a = generate_round(_spec(attack='OPA', target='m1v3', beta=0.3), self.pop, self.printed)
+        b = generate_round(_spec(attack='IPA', target='m3v1', spread_ratio=None, beta=0.3), self.pop, self.printed)
+        for r in (a, b):
+            self.assertTrue(r.generated, (r.spec.attack, r.status, r.meta.get('budget')))
         self.assertEqual(a.spec.base_round_id, b.spec.base_round_id)
         np.testing.assert_array_equal(np.sort(a.reports[~a.is_fake]), np.sort(b.reports[~b.is_fake]))
 
