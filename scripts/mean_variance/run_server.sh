@@ -18,7 +18,10 @@
 #   breadth    main grid: generate, evaluate sharded over GPUs, report                        [GPU]
 #   mech       optional, after breadth: MLP/FT with mech features on breadth's PM rounds, then
 #              compare_mech.py (base vs mech, paired; logs/mech_compare.log)                  [GPU]
-# `all` = preflight, smoke, then the CPU track (paper, kmeans) next to the GPU track (budget, breadth).
+#   asr        after budget and breadth: attack success before / after each defence, kept share of hits,
+#              MSE and utility gain, from per_round files (attack_success.py ->
+#              <experiment>/attack_success.csv.gz, a few MB; copy these to plot locally)    [CPU]
+# `all` = preflight, smoke, then the CPU track (paper, kmeans) next to the GPU track (budget, breadth), then asr.
 #
 # Env overrides:
 #   PY          python of the conda env (default: /home/boby/miniconda3/envs/attacker-detector/bin/python)
@@ -181,12 +184,20 @@ stage_mech () {
   sed -n '/^== by view and attack/,/^$/p' "$LOGS/mech_compare.log" | sed 's/^/    /'
 }
 
+# attack success rate before / after defence, paired per round; a few MB per experiment
+stage_asr () {
+  local jobs=$(( NCPU < 32 ? NCPU : 32 ))
+  job asr "$PY" scripts/mean_variance/attack_success.py --results-root "$R" --jobs "$jobs" || return 1
+  ls -lh "$R"/*/attack_success.csv.gz | awk '{print "    " $5 "  " $NF}'
+}
+
 stage_all () {
   stage_preflight || return 1
   stage_smoke || return 1
   ( stage_paper; p=$?; stage_kmeans; exit $(( p || $? )) ) & local cpu=$!
   ( stage_budget; b=$?; stage_breadth; exit $(( b || $? )) ) & local gpu=$!
-  wait_all $cpu $gpu
+  wait_all $cpu $gpu || return 1
+  stage_asr
 }
 
 # ------------------------------------------------------------------ main

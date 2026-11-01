@@ -5,6 +5,8 @@ Primary (defense comparisons): error against the genuine users' empirical moment
     AG = MSE_before - MSE_after (paper Sec. 8.1), reported separately for mean and variance;
     negative gains are kept
 Attack validation: MSE to the attacker's target (paper Sec. 7.1), shift-achieved ratio.
+Attack success (per round): each attacked statistic lands within tol of its intended shift;
+ASR before (no defence) / after a defence, and the fraction of hits that survive the defence.
 Classifier diagnostics: precision, recall, F1, PR-AUC, genuine-removal rate.
 Clean rounds (no fakes): recall and F1 are undefined (NaN); precision is NaN when
 nothing is removed and 0 otherwise; the genuine-removal rate is always defined.
@@ -57,6 +59,25 @@ def shift_achieved(est, truth, target, baseline=None):
     den = target - truth
     with np.errstate(divide='ignore', invalid='ignore'):
         return np.where(np.abs(den) > 1e-15, (est - base) / den, np.nan)
+
+
+def attack_success(est, truth, target, tol=0.5):
+    """1 if the estimate lands within tol of the intended shift, |est - target| <= tol |target - truth|, else 0.
+
+    Same as shift_achieved(est, truth, target) in [1 - tol, 1 + tol]. NaN where the statistic is not
+    attacked (target == truth, e.g. the preserved index of an offset target) or there is no target.
+    """
+    est, truth, target = (np.asarray(a, float) for a in (est, truth, target))
+    shift = np.abs(target - truth)
+    with np.errstate(invalid='ignore'):
+        hit = (np.abs(est - target) <= tol * shift).astype(float)
+        return np.where(shift > 1e-12, hit, np.nan)
+
+
+def joint_success(*flags):
+    """1 if every attacked statistic is hit, 0 if any is missed, NaN if none is attacked."""
+    f = np.vstack([np.asarray(x, float) for x in flags])
+    return np.where((~np.isnan(f)).any(0), np.where((f == 0).any(0), 0.0, 1.0), np.nan)
 
 
 def classification(is_fake, removed, scores=None) -> dict:

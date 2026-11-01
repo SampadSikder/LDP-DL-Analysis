@@ -65,7 +65,7 @@ Brief §16 checks **not yet automated**: "every model receives the same test rou
 | Feasibility maps | 3 sources × {IPA, OPA-SR, OPA-PM}, ε=1, exact knowledge | IPA can reach about 172 of 323 targets, OPA all 323; OPA-PM needs the fewest fakes |
 | Pilot | PM, ε=1, Taxi, full beta/attack/target grid, 20/10/20 rounds | completed; timing and directional utility in section 4 |
 | Frozen shift (smoke) | eps 1 checkpoints → eps 2 test rounds | completed (pipeline check only) |
-| k-means defense verification (paper Sec. 8.1 / Fig. 12) | Taxi at full size, eps 1, Table 4 knowledge, 100 repetitions; r sweep 0.1-0.9, then beta, target-mean and target-variance sweeps at r = 0.6 | **Paper gains not reproduced.** PM AG ~0; SR's small gain (<= 14% of damage) is a deterministic hypergeometric-skew shift toward the domain midpoint, which also raises MSE on clean rounds. See deviations.md and `results/mean_variance/verify_kmeans_figures/` |
+| k-means defense verification (paper Sec. 8.1 / Fig. 12) | Taxi at full size, eps 1, Table 4 knowledge, 100 repetitions; r sweep 0.1-0.9, then beta, target-mean and target-variance sweeps at r = 0.6 | **Paper gains not reproduced.** PM AG ~0; SR's small gain (<= 14% of damage) is a deterministic hypergeometric-skew shift toward the domain midpoint, which also raises MSE on clean rounds. See deviations.md and `results/figures/mean_variance/originals/verify_kmeans_figures/` |
 
 ## 4. Pilot timing (PM, ε=1, Taxi; 3,260 train / 1,630 val / 3,260 test rounds; N cycled over 2,048 / 4,096 / 8,192)
 Measured on this machine (Apple silicon, 14 cores, MPS), one seed. The pilot config used `square_mode: raw` because it predates the switch to `normalized`; runtime does not depend on the convention, but its utility numbers do.

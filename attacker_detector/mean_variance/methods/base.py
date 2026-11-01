@@ -1,9 +1,4 @@
 """Common interface for every utility-recovery method.
-
-fit(train, val) receives TrainingRound objects (observation + labels); predict()
-receives only a round's observation dict, except for methods that declare
-needs_labels (oracle removal, an evaluation reference). Every prediction returns
-raw benchmark-scale moments plus the declared feasibility projection.
 """
 
 import time
@@ -29,9 +24,8 @@ class TrainingRound:
 class MethodOutput:
     mean_raw: float
     var_raw: float
-    mean: float = 0.0                         # after the feasibility projection
     var: float = 0.0
-    removed: Optional[np.ndarray] = None      # detect-and-remove methods
+    removed: Optional[np.ndarray] = None      
     scores: Optional[np.ndarray] = None
     fallback: list = field(default_factory=list)
     info: dict = field(default_factory=dict)
@@ -43,7 +37,7 @@ class MethodOutput:
 
 class Method:
     name = 'method'
-    kind = 'recovery'          # 'recovery' | 'removal' | 'reference'
+    kind = 'recovery'         
     needs_labels = False
 
     def fit(self, train, val):

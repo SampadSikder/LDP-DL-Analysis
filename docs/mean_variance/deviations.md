@@ -54,7 +54,7 @@ MSE_before is 7.4e-3 (SR) and 7.5e-3 (PM) for the mean, and 1.2-1.3e-3 for the v
 - beta 0.05-0.75: OPA-SR AG_mean 1.05e-3 falling to 5.6e-4; OPA-PM between -1.6e-4 and +4e-5; IPA (feasible only at beta >= 0.25) SR +9.5e-4 to +5.6e-4, PM ~0.
 - Target mean -0.06 to +0.06: OPA-SR -1.2e-4 to +1.0e-3; OPA-PM within +-1e-4.
 - Target variance 0.33-0.40: OPA-SR AG_mean 1.05e-3 throughout (the mean target is fixed); OPA-PM ~0.
-- MSE_before for the mean is about 7.5e-3 throughout. Figure: `results/mean_variance/verify_kmeans_figures/fig12_kmeans_taxi.{svg,png}`.
+- MSE_before for the mean is about 7.5e-3 throughout. Figure: `results/figures/mean_variance/originals/verify_kmeans_figures/fig12_kmeans_taxi.{svg,png}`.
 
 **Not reproduced.** The paper shows positive gains peaking around r ~ 0.3. Here k-means removes at most about 14% of the mean damage (SR, r >= 0.6) and nothing measurable for PM.
 

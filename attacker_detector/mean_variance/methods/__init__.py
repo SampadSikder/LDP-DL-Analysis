@@ -1,5 +1,3 @@
-"""Method registry. make_method raises MethodUnavailable instead of substituting another method."""
-
 from .base import Method, MethodOutput, TrainingRound
 from .baselines import ConstantMethod, KMeansRecovery, OracleRemoval, StandardMethod
 from .catboost_recovery import CATBOOST_AVAILABLE, CatBoostRecovery
