@@ -1,14 +1,6 @@
 """Resumable on-disk storage of generated rounds.
 
-Layout under <out>/<experiment>/rounds/:
-  manifest.jsonl                 one record per spec: spec fields, status, realized counts,
-                                 targets, checksum (appended; completed ids are skipped on resume)
-  <split>/<protocol>_eps<e>_<source>.npz
-                                 observation + labels of generated rounds in one shard:
-                                 reports (float32), groups (int8), is_fake (bool),
-                                 offsets (round boundaries), round_ids
-Labels and manifests never sit in the observation arrays; loaders return them
-separately.
+npz and manifest.json file
 """
 
 import json
@@ -32,7 +24,6 @@ class RoundStore:
         self.manifest_path = os.path.join(root, 'manifest.jsonl')
         os.makedirs(root, exist_ok=True)
 
-    # ---------------- manifest ----------------
     def manifest(self) -> dict:
         out = {}
         if os.path.exists(self.manifest_path):
@@ -48,7 +39,6 @@ class RoundStore:
             for r in records:
                 f.write(json.dumps(r) + '\n')
 
-    # ---------------- generation ----------------
     def generate(self, specs, banks, log_every: int = 2000):
         """Generate every spec not already in the manifest; writes one shard per group."""
         done = self.manifest()
@@ -77,7 +67,7 @@ class RoundStore:
                     rss = psutil.Process().memory_info().rss / 2 ** 30
                     print(f"  generated {n_done:,}/{len(todo):,} (rss {rss:.2f} GB)", flush=True)
             self._save_shard(path, arrays)
-            self._append(records)          # manifest after the shard: a crash re-generates the group
+            self._append(records)    
         return len(todo)
 
     @staticmethod
@@ -85,7 +75,6 @@ class RoundStore:
         """Existing shard content, minus rounds about to be regenerated (crash recovery)."""
         arrays = {'reports': [], 'groups': [], 'is_fake': [], 'round_ids': []}
         if os.path.exists(path):
-            # NpzFile re-reads an array on every key access: read each array once
             with np.load(path, allow_pickle=False) as z:
                 off, rids = z['offsets'], z['round_ids']
                 rep, grp, fake = z['reports'], z['groups'], z['is_fake']

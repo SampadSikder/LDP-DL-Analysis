@@ -1,12 +1,8 @@
 """Experiment configuration -> round specs; parent-population banks per split.
-
-A config (YAML) names the protocols, sources, epsilons, betas, attacks, target
-grid, rounds per cell and split, and the round-size profile. Replicate `rep`
-of every cell in a split uses parent population `rep` of that split, so all
-cells share populations (paired comparisons), and no population crosses splits.
 """
 
 import itertools
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,8 +16,13 @@ PM_MAIN_SPREADS = (0.05, 0.10, 0.25, 0.50, 1.0)
 
 
 def load_config(path: str) -> dict:
+    """YAML config; `extends: other.yaml` (relative to this file) loads that first, then overrides
+    its top-level keys."""
     with open(path) as f:
         cfg = yaml.safe_load(f)
+    base = cfg.pop('extends', None)
+    if base:
+        cfg = {**load_config(os.path.join(os.path.dirname(os.path.abspath(path)), base)), **cfg}
     cfg.setdefault('experiment', 'unnamed')
     return cfg
 

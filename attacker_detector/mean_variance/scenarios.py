@@ -73,8 +73,7 @@ class RoundSpec:
     below_budget: str = 'skip'            # 'skip': infeasible -> not generated | 'saturate': separate evaluation
 
     def _id_dict(self) -> dict:
-        """Fields hashed into ids; budget fields at their defaults are omitted so ids of
-        rounds generated before they existed do not change."""
+
         d = asdict(self)
         for f, default in (('budget_mode', 'beta'), ('budget_factor', None), ('below_budget', 'skip')):
             if d[f] == default:

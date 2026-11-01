@@ -16,6 +16,8 @@
 #   kmeans     paper Sec. 8.1 k-means verification: rate, beta, mean, variance sweeps         [CPU]
 #   budget     budget ladder (train + evaluate), then below-budget frozen evaluation          [GPU]
 #   breadth    main grid: generate, evaluate sharded over GPUs, report                        [GPU]
+#   mech       optional, after breadth: MLP/FT with mech features on breadth's PM rounds, then
+#              compare_mech.py (base vs mech, paired; logs/mech_compare.log)                  [GPU]
 # `all` = preflight, smoke, then the CPU track (paper, kmeans) next to the GPU track (budget, breadth).
 #
 # Env overrides:
@@ -171,6 +173,13 @@ stage_budget () {
 }
 
 stage_breadth () { grid "$C/breadth.yaml" breadth; }
+
+# mech-feature ablation on breadth's PM rounds (needs breadth generate), then the paired comparison
+stage_mech () {
+  eval_sharded "$C/breadth_mech.yaml" breadth_mech || return 1
+  job mech_compare "$PY" scripts/mean_variance/compare_mech.py --results-root "$R" || return 1
+  sed -n '/^== by view and attack/,/^$/p' "$LOGS/mech_compare.log" | sed 's/^/    /'
+}
 
 stage_all () {
   stage_preflight || return 1

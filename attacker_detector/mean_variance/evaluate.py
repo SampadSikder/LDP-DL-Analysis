@@ -1,13 +1,5 @@
 """Train once per (protocol, epsilon, training-source set), freeze, evaluate every destination.
 
-Partitions:
-  single-source  train S -> test S (within-source) and every T != S (cross-population).
-                 The same frozen checkpoint serves all destinations.
-  multi-source   train S1 + S2 -> test the third source
-Validation always comes from the training sources' val split. Every method sees
-identical test observations; labels from the manifest are used only for metrics
-(and by the oracle reference). Results are written per round. A finished
-(training set, method, seed) unit is marked done and skipped when re-run.
 """
 
 import json
@@ -195,7 +187,6 @@ def _cluster_bootstrap(df, col, clusters='population_id', n_boot=500, seed=0):
 
 def aggregate(results: pd.DataFrame, by=('partition', 'train_sources', 'source', 'protocol', 'epsilon',
                                          'beta', 'attack', 'method'), n_boot: int = 500) -> pd.DataFrame:
-    """Utility per cell, with AG against the standard estimate on the same rounds."""
     r = results.copy()
     r['std_sq_err_mean'] = (r['standard_mean'] - r['genuine_mean']) ** 2
     r['std_sq_err_var'] = (r['standard_variance'] - r['genuine_variance']) ** 2

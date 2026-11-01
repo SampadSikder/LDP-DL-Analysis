@@ -10,6 +10,7 @@ inferred-from-figure or proposed-extension.
 | `paper_settings.yaml` | (reference) | Every protocol, attacker, dataset, sweep, target and budget-stage setting, with its classification and its section, table or figure in the paper |
 | `smoke.yaml` | `smoke` | Small run that touches every component end to end (SR+PM, eps 1, 3 sources, 3 betas, all methods, 4 epochs). Not a result |
 | `breadth.yaml` | `generate` / `evaluate` / `report` | The full breadth grid from the brief: 2 protocols × 3 sources × 5 eps × 10 betas × 2 attacks × 9 targets, 20/10/100 rounds, sizes 2,048 / 4,096 / 8,192, 3 seeds. Configured but not run (estimated at about 7 days sequential) |
+| `breadth_mech.yaml` | `evaluate` (after breadth `generate`) | **Ablation.** `extends: breadth.yaml`, PM only, methods `mlp_removal_mech` / `ft_removal_mech` (base features + residuals against a sum-to-one NNLS fit of PM output densities). Same experiment name, so it reuses breadth's rounds; compare with `scripts/mean_variance/compare_mech.py`. Run on the server with `run_server.sh mech` |
 | `budget_sweep.yaml` | `smoke` | **Proposed extension.** Budget ladder m = ceil(f * m_min), f in {1, 1.1, 1.25, 1.5, 2}, with a fixed genuine population (n = 4,096) |
 | `below_budget.yaml` | `generate --splits test`, then `evaluate-frozen` | **Separately labelled** below-budget run: f in {0.5, 0.75, 0.9}, saturated best effort, scored with frozen `budget_sweep` checkpoints |
 | `paper_attack_default.yaml` | `attack-validate` | Paper defaults at full scale (Taxi, Income): eps 1, beta 0.1, Table 4 targets, 100 repetitions |
@@ -29,6 +30,7 @@ Also in this folder but git-ignored (one-off): `pilot.yaml` (runtime pilot: PM, 
 (a Taxi-only copy of `paper_attack_default.yaml`).
 
 Common keys:
+- `extends: other.yaml` (relative to this file): load that config first, then override its top-level keys
 - `experiment`, `protocols`, `sources`, `epsilon`, `beta`, `attacks`
 - `targets`: `m{i}v{j}` from the printed triplets
 - `rounds` (per split), `sizes`, `size_mode` (`fixed_total` | `fixed_genuine`)

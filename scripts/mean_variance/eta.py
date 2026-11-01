@@ -81,6 +81,7 @@ def predicted(u, counts):
     """Pilot-speed seconds: fit scaled by training rounds (k-means: fixed 300-round rate search),
     plus inference per test round over all destinations."""
     p, e, _, tr, te, m, _ = u
+    m = m.removesuffix('_mech')                                   # mech features add ~3 ms per round
     n_train = sum(counts.get(('train', p, e, s), 0) for s in tr)
     n_test = sum(counts.get(('test', p, e, s), 0) for s in te)
     fit = FIT.get(m, 0.0) * (1 if m == 'kmeans' else n_train / PILOT_TRAIN)
@@ -100,11 +101,12 @@ def main():
     cfg = load_config(os.path.join(ROOT, args.config) if not os.path.isabs(args.config) else args.config)
     res = os.path.join(ROOT, args.results_root) if not os.path.isabs(args.results_root) else args.results_root
     exp = cfg['experiment']
-    logs = sorted(glob.glob(os.path.join(res, 'logs', f'{exp}_evaluate_shard*.log')),
+    name = os.path.splitext(os.path.basename(args.config))[0]    # run_server.sh names logs by config
+    logs = sorted(glob.glob(os.path.join(res, 'logs', f'{name}_evaluate_shard*.log')),
                   key=lambda p: int(re.search(r'shard(\d+)\.log$', p).group(1)))
     n = args.shards or len(logs)
     if not n:
-        sys.exit(f"no shard logs in {res}/logs for {exp}; pass --shards")
+        sys.exit(f"no shard logs in {res}/logs for {name}; pass --shards")
     units = unit_list(cfg)
     units_dir = os.path.join(res, exp, 'units')
     counts = round_counts(res, exp)
@@ -153,7 +155,7 @@ def main():
           f"{sum(v == 'failed' for v in status.values())} failed, "
           f"{sum(v == 'unavailable' for v in status.values())} unavailable), {n} shards")
 
-    meths = sorted((m for m in {u[5] for u in units} if m in FIT),        # skip near-free baselines
+    meths = sorted((m for m in {u[5] for u in units} if m.removesuffix('_mech') in FIT),   # skip near-free baselines
                    key=lambda m: -predicted(next(x for x in units if x[5] == m), counts))
     print("speed vs Mac pilot (observed / predicted; <1 = server faster):")
     for m in meths:

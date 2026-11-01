@@ -2,8 +2,11 @@
 
 | File | What it contains |
 |---|---|
-| `run_server.sh` | Runs every experiment on the lab server (Linux, CUDA): preflight, smoke, paper attack validation, k-means verification, budget ladder, breadth grid with `evaluate` sharded over GPUs. Resumable. `nohup bash scripts/mean_variance/run_server.sh all > run_mv_all.log 2>&1 &`; see the header for stages and env overrides |
-| `run.py` | The single CLI for the benchmark. Run it with `~/miniconda3/envs/ldp-attacker-detector/bin/python scripts/mean_variance/run.py <command> [--config ...]`. Outputs go to `results/mean_variance/<experiment>/` (git-ignored) |
+| `run_server.sh` | Runs every experiment on the lab server (Linux, CUDA): preflight, smoke, paper attack validation, k-means verification, budget ladder, breadth grid with `evaluate` sharded over GPUs. Resumable. Every output, including its own console log `run_server.log`, goes to `results/mean_variance_server/` (`RESULTS=` overrides). `nohup bash scripts/mean_variance/run_server.sh all > /dev/null 2>&1 &`; see the header for stages and env overrides |
+| `check_cuda.py` | CUDA preflight: GPUs visible to torch, kernels run on each GPU, `device_for('auto')` and every neural method in the config pick cuda, MLP / FT / Deep Sets / Set Transformer each train one epoch on GPU, and each `CUDA_VISIBLE_DEVICES=i` shard sees its own GPU. Exit 0 = pass. Also run by `run_server.sh preflight` / `run_server.sh cuda` |
+| `eta.py` | Progress and finish-time estimate for a sharded `evaluate` run (default: breadth in `results/mean_variance_server`). Calibrates the Mac pilot's per-unit costs against finished units' logged times, per method and protocol; lists failed units (they are marked done and skipped on rerun). Read-only |
+| `compare_mech.py` | Base vs `mech` features for MLP / FT removal, paired on the same PM test rounds: change in mean / variance MSE (% of base, population-bootstrap 95% CI) by view (within / cross / multi-source) and attack, clean-round damage against the standard method, per eps, and per transfer pair (e.g. taxi -> income). Writes `<experiment>/mech_comparison.csv`. Run by `run_server.sh mech` |
+| `run.py` | The single CLI for the benchmark. Run it with `~/miniconda3/envs/ldp-attacker-detector/bin/python scripts/mean_variance/run.py <command> [--config ...]`. Outputs go to `results/mean_variance/<experiment>/` (git-ignored); `--results-root DIR` moves every output of a command under DIR |
 
 | Command | What it does |
 |---|---|

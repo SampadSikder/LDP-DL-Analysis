@@ -5,25 +5,6 @@ is the observation dict (reports, groups, counts, protocol, epsilon, domain,
 square_mode). Per-report features depend on the report's value, its group and
 the multiset of reports in the round, so shuffling a round permutes them
 consistently, and identical SR (group, sign) cells get identical rows.
-
-PM per report (own group g, s = PM bound, W = s - 1 plateau width):
-  y/s, is_g1, (s - |y|)/s, tie-aware percentile,
-  neighbourhood density at half-widths {1/16, 1/8, 1/4, 1/2, 1} x W/2
-      (count within the window / count expected under a flat density on [-s, s]),
-  k-NN distance for k in {1, 4, 16} over the flat-density spacing 2s/n_g
-PM round context (per own group, repeated on its rows):
-  log group size, decoded group mean, quantiles of y/s, 8-bin histogram,
-  max / mean / std of the narrowest neighbourhood density,
-  standard decoded mean and variance (benchmark scale)
-SR per report:
-  sign, is_g1, the four (group, sign) frequencies within groups, log group sizes,
-  standard decoded mean and variance
-Mechanism-aware ablation (PM, feature_set='mech'):
-  log(observed / fitted) and observed - fitted share at the report's bin, where
-  'fitted' is a non-negative least-squares mixture of PM output densities over a
-  grid of inputs; plus the group's total positive excess. No contamination
-  allowance is used. Variation across admissible fits is not implemented
-  (reported as unavailable).
 """
 
 import numpy as np
@@ -96,7 +77,6 @@ PM_CONTEXT_NAMES = (['log_group_size'] + [f'q{int(q * 100):02d}' for q in QUANTI
                     + [f'hist_{i}' for i in range(HIST_BINS)] + ['dens_max', 'dens_mean', 'dens_std'])
 
 
-# ---------------------------------------------------------------- mechanism-aware ablation
 def pm_kernel_matrix(s: float, eps: float, n_bins: int = 128, n_atoms: int = 96):
     mech = PM(eps)
     edges = np.linspace(-s, s, n_bins + 1)
@@ -107,13 +87,24 @@ def pm_kernel_matrix(s: float, eps: float, n_bins: int = 128, n_atoms: int = 96)
     return edges, mech.pdf_high * ov + mech.pdf_low * ((b - a) - ov)
 
 
-def _pm_mech_group(y: np.ndarray, s: float, eps: float):
+def pm_mixture_fit(y: np.ndarray, s: float, eps: float):
+    """Weighted NNLS fit of the group's histogram by a mixture of PM output densities.
+    Returns (edges, observed counts, fitted counts, weights); weights >= 0 and sum to 1."""
     edges, K = pm_kernel_matrix(s, eps)
     n = len(y)
     h = np.histogram(y, bins=edges)[0].astype(float)
     w = 1.0 / np.sqrt(np.maximum(h, 1.0))
-    pi, _ = nnls(w[:, None] * K * n, w * h, maxiter=2000)
-    fit = n * K @ pi
+    # sum-to-one row: without it the 1/h weighting fits low (sum ~0.86 on clean 1k groups)
+    lam = 1e3 * np.sqrt(max(n, 1))
+    A = np.vstack([w[:, None] * K * n, np.full(K.shape[1], lam)])
+    pi, _ = nnls(A, np.r_[w * h, lam], maxiter=2000)
+    pi /= pi.sum()
+    return edges, h, n * K @ pi, pi
+
+
+def _pm_mech_group(y: np.ndarray, s: float, eps: float):
+    edges, h, fit, _ = pm_mixture_fit(y, s, eps)
+    n = len(y)
     kb = np.clip(np.searchsorted(edges, y, side='right') - 1, 0, len(h) - 1)
     resid_ratio = np.log((h + 1.0) / (fit + 1.0))[kb]
     resid_share = ((h - fit) / max(n, 1))[kb]
@@ -125,9 +116,7 @@ PM_MECH_NAMES = ['fit_log_ratio', 'fit_excess_share']
 PM_MECH_CONTEXT = ['fit_excess_total']
 
 
-# ---------------------------------------------------------------- per-report views
 def report_features(obs, feature_set: str = 'base'):
-    """(X float32 [N, d], names), rows aligned with obs['reports']."""
     if obs['protocol'] == 'SR':
         return _sr_report_features(obs)
     return _pm_report_features(obs, feature_set)
@@ -173,9 +162,7 @@ def _sr_report_features(obs):
     return X.astype(np.float32), list(SR_NAMES)
 
 
-# ---------------------------------------------------------------- round-level view
 def round_summary(obs, n_bins: int = 32):
-    """Fixed-length summary of a round (for CatBoost recovery), plus names."""
     tf, mech = _setup(obs)
     y, g = np.asarray(obs['reports'], np.float64), np.asarray(obs['groups'])
     mean_n, var_n = standard_moments(obs)
