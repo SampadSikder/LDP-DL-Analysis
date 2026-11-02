@@ -1,0 +1,12 @@
+# Feature-view ablation for the set models, part 1: 'context' (the original two-value tokens plus a
+# richer observation-only round context: PM per-group quantiles, histogram and narrowest-density
+# max / mean / std; SR within-group sign shares). PM and SR.
+# Same experiment name and grid as breadth, so it evaluates on breadth's generated rounds with
+# breadth's splits, seeds, neural settings (token cap, rounds per batch, epochs, patience), widths and
+# hybrid loss, and writes its units next to breadth's under new method names (nothing is overwritten).
+# The 'minimal' baseline is breadth's own deepsets_recovery / settransformer_recovery.
+# Run after breadth `generate`:  bash scripts/mean_variance/run_server.sh setfeat
+# Compare with scripts/mean_variance/compare_setfeat.py. This tests whether explicit summaries help
+# learning and utility; more features do not by themselves make attackers identifiable or transfer.
+extends: breadth.yaml
+methods: [deepsets_recovery_context, settransformer_recovery_context]

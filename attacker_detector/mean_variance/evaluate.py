@@ -67,6 +67,8 @@ def _row(method, seed, tag, r: TrainingRound, rec, out):
     row['sq_err_var'] = (out.var - lab['genuine_variance']) ** 2
     row['sq_err_mean_raw'] = (out.mean_raw - lab['genuine_mean']) ** 2
     row['sq_err_var_raw'] = (out.var_raw - lab['genuine_variance']) ** 2
+    # set models split their runtime: feature extraction vs network (runtime = both, end to end)
+    row.update({k: out.info[k] for k in ('t_features', 't_network') if k in out.info})
     if out.removed is not None:
         c = classification(r.is_fake, out.removed, out.scores)
         row.update({f'clf_{k}': v for k, v in c.items()})

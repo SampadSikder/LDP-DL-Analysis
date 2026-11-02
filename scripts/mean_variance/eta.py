@@ -82,6 +82,7 @@ def predicted(u, counts):
     plus inference per test round over all destinations."""
     p, e, _, tr, te, m, _ = u
     m = m.removesuffix('_mech')                                   # mech features add ~3 ms per round
+    m = re.sub(r'_context(_report)?$', '', m)                     # set-model feature views: ~+2.5 ms/round (PM)
     n_train = sum(counts.get(('train', p, e, s), 0) for s in tr)
     n_test = sum(counts.get(('test', p, e, s), 0) for s in te)
     fit = FIT.get(m, 0.0) * (1 if m == 'kmeans' else n_train / PILOT_TRAIN)

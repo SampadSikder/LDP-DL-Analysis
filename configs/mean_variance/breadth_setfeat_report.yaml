@@ -1,0 +1,10 @@
+# Feature-view ablation for the set models, part 2: 'context_report' (the 'context' inputs, plus per
+# report: boundary distance, tie-aware within-group percentile, five neighbourhood densities and three
+# k-NN distances, all computed on the full round before token sampling). PM only: SR has no further
+# per-report features, so for SR this view is an alias of 'context' and running it would only
+# duplicate breadth_setfeat.yaml's SR results.
+# Same experiment and grid as breadth (see breadth_setfeat.yaml); compared against
+# *_recovery_context by scripts/mean_variance/compare_setfeat.py. Run with run_server.sh setfeat.
+extends: breadth.yaml
+protocols: [PM]
+methods: [deepsets_recovery_context_report, settransformer_recovery_context_report]

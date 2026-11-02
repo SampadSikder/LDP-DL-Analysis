@@ -14,7 +14,7 @@ import torch
 from ..metrics import UtilityScales
 from .baselines import ConstantMethod, KMeansRecovery, OracleRemoval, StandardMethod
 from .removal import ClassifierRemoval
-from .set_models import DeepSetsNet, SetRecovery, SetTransformerNet
+from .set_models import SetRecovery
 
 
 def save_checkpoint(method, path: str):
@@ -50,13 +50,16 @@ def load_checkpoint(path: str, device: str = 'cpu'):
         m.model.eval()
         return m
     if name.startswith(('deepsets_recovery', 'settransformer_recovery')):
+        # checkpoints written before feature views have no 'feature_view': they are 'minimal'
         m = SetRecovery(st['arch'], loss=st['loss'], lambda_clean=st['lambda_clean'] or 1.0,
                         lambda_aux=st['lambda_aux'] or 0.1, lambda_var=st['lambda_var'],
-                        token_cap=st['token_cap_train'], seed=st['seed'], device=device)
+                        token_cap=st['token_cap_train'], feature_view=st.get('feature_view', 'minimal'),
+                        seed=st['seed'], device=device)
         sc = st['scales']
         m.scales_ = UtilityScales(sc['scale_mean'], sc['scale_var'], sc['lambda_var'])
         m.history, m.best_val_utility_ = st['history'], st['best_val_utility']
-        m.model = (DeepSetsNet() if st['arch'] == 'deepsets' else SetTransformerNet()).to(m.device)
+        m.restore_features(st)                       # schema + train-only scaler; rejects mismatches
+        m.model = m._net().to(m.device)
         m.model.load_state_dict(weights)
         m.model.eval()
         return m

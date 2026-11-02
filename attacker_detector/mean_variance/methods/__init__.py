@@ -2,7 +2,12 @@ from .base import Method, MethodOutput, TrainingRound
 from .baselines import ConstantMethod, KMeansRecovery, OracleRemoval, StandardMethod
 from .catboost_recovery import CATBOOST_AVAILABLE, CatBoostRecovery
 from .removal import ClassifierRemoval
-from .set_models import LOSS_VARIANTS, SetRecovery
+import re
+
+from .set_models import FEATURE_VIEWS, LOSS_VARIANTS, SetRecovery
+
+# <arch>_recovery[_<view>][[<loss>]]; the view is part of the name so outputs never collide
+SET_NAME = re.compile(r'^(deepsets|settransformer)_recovery(?:_(context|context_report))?(?:\[(.+)\])?$')
 
 
 class MethodUnavailable(RuntimeError):
@@ -28,12 +33,18 @@ def make_method(name: str, seed: int = 0, cfg: dict = None) -> Method:
         if not CATBOOST_AVAILABLE:
             raise MethodUnavailable("catboost not installed (pip install catboost)")
         return CatBoostRecovery(seed=seed, **cfg.get('catboost', {}))
-    for arch in ('deepsets', 'settransformer'):
-        if name == f'{arch}_recovery':
-            return SetRecovery(arch, seed=seed, **nn_cfg)
-        for variant in LOSS_VARIANTS:
-            if name == f'{arch}_recovery[{variant}]':
-                return SetRecovery(arch, loss=variant, seed=seed, **nn_cfg)
+    m = SET_NAME.match(name)
+    if m:
+        arch, view, loss = m.group(1), m.group(2) or 'minimal', m.group(3) or 'utility+clean+aux'
+        if loss not in LOSS_VARIANTS:
+            raise ValueError(f"unknown loss variant in {name!r}; one of {LOSS_VARIANTS}")
+        kw = dict(nn_cfg)
+        cfg_view = kw.pop('feature_view', None)
+        if cfg_view is not None and cfg_view != view:
+            # a config-level view would write under the baseline's name and overwrite its results
+            raise ValueError(f"neural.feature_view={cfg_view!r} conflicts with method {name!r}; select the view "
+                             f"by method name, e.g. {arch}_recovery_{cfg_view}")
+        return SetRecovery(arch, loss=loss, feature_view=view, seed=seed, **kw)
     raise ValueError(f"unknown method {name!r}")
 
 

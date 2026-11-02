@@ -18,6 +18,9 @@
 #   breadth    main grid: generate, evaluate sharded over GPUs, report                        [GPU]
 #   mech       optional, after breadth: MLP/FT with mech features on breadth's PM rounds, then
 #              compare_mech.py (base vs mech, paired; logs/mech_compare.log)                  [GPU]
+#   setfeat    optional, after breadth: Deep Sets / Set Transformer with richer observation-only inputs
+#              (feature views 'context', PM+SR; 'context_report', PM) on breadth's rounds, then
+#              compare_setfeat.py (paired vs the 'minimal' breadth models; logs/setfeat_compare.log) [GPU]
 #   asr        after budget and breadth: attack success before / after each defence, kept share of hits,
 #              MSE and utility gain, from per_round files (attack_success.py ->
 #              <experiment>/attack_success.csv.gz, a few MB; copy these to plot locally)    [CPU]
@@ -182,6 +185,15 @@ stage_mech () {
   eval_sharded "$C/breadth_mech.yaml" breadth_mech || return 1
   job mech_compare "$PY" scripts/mean_variance/compare_mech.py --results-root "$R" || return 1
   sed -n '/^== by view and attack/,/^$/p' "$LOGS/mech_compare.log" | sed 's/^/    /'
+}
+
+# feature-view ablation for the set models on breadth's rounds (needs breadth generate + evaluate),
+# then the paired comparison; new method names, so breadth's own results and checkpoints stay as they are
+stage_setfeat () {
+  eval_sharded "$C/breadth_setfeat.yaml" breadth_setfeat || return 1
+  eval_sharded "$C/breadth_setfeat_report.yaml" breadth_setfeat_report || return 1
+  job setfeat_compare "$PY" scripts/mean_variance/compare_setfeat.py --results-root "$R" || return 1
+  sed -n '/^== verdicts/,/^$/p' "$LOGS/setfeat_compare.log" | sed 's/^/    /'
 }
 
 # attack success rate before / after defence, paired per round; a few MB per experiment

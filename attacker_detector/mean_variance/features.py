@@ -46,7 +46,9 @@ def _knn(sorted_y: np.ndarray, k: int) -> np.ndarray:
     return np.partition(d, k - 1, axis=1)[:, k - 1]
 
 
-def _pm_group_features(y: np.ndarray, s: float):
+def pm_group_features(y: np.ndarray, s: float):
+    """One PM group's per-report features (PM_REPORT_NAMES) and context (PM_CONTEXT_NAMES), from the
+    group's full set of reports; ties share their average rank."""
     n = len(y)
     W = s - 1.0
     order = np.argsort(y, kind='stable')
@@ -133,7 +135,7 @@ def _pm_report_features(obs, feature_set):
     X = np.empty((len(y), d), dtype=np.float64)
     for grp in (G1, G2):
         idx = np.flatnonzero(g == grp)
-        rf, ctx = _pm_group_features(y[idx], mech.s)
+        rf, ctx = pm_group_features(y[idx], mech.s)
         k, lo = (tf.k1, tf.a) if grp == G1 else (tf.k2, tf.q_lo)
         gmean = mech.decode(y[idx], k, lo).mean() if len(idx) else 0.0
         gmean_n = tf.norm_mean(gmean) if grp == G1 else (gmean - tf.q_lo) * tf.k2 - 1.0
@@ -151,11 +153,18 @@ SR_NAMES = ['sign', 'is_g1', 'freq_g1_plus', 'freq_g1_minus', 'freq_g2_plus', 'f
             'log_n_g1', 'log_n_g2', 'standard_mean', 'standard_variance']
 
 
+def sr_sign_frequencies(obs) -> np.ndarray:
+    """Within-group sign shares (freq_g1_plus, freq_g1_minus, freq_g2_plus, freq_g2_minus)."""
+    y, g = np.asarray(obs['reports'], np.float64), np.asarray(obs['groups'])
+    n1, n2 = max(int(np.sum(g == G1)), 1), max(int(np.sum(g == G2)), 1)
+    return np.array([np.sum((g == G1) & (y > 0)) / n1, np.sum((g == G1) & (y < 0)) / n1,
+                     np.sum((g == G2) & (y > 0)) / n2, np.sum((g == G2) & (y < 0)) / n2])
+
+
 def _sr_report_features(obs):
     y, g = np.asarray(obs['reports'], np.float64), np.asarray(obs['groups'])
     n1, n2 = max(int(np.sum(g == G1)), 1), max(int(np.sum(g == G2)), 1)
-    f = [np.sum((g == G1) & (y > 0)) / n1, np.sum((g == G1) & (y < 0)) / n1,
-         np.sum((g == G2) & (y > 0)) / n2, np.sum((g == G2) & (y < 0)) / n2]
+    f = sr_sign_frequencies(obs)
     mean_n, var_n = standard_moments(obs)
     row_ctx = np.r_[f, np.log(n1), np.log(n2), mean_n, var_n]
     X = np.column_stack([np.sign(y), (g == G1).astype(float), np.tile(row_ctx, (len(y), 1))])
@@ -174,7 +183,7 @@ def round_summary(obs, n_bins: int = 32):
         return np.asarray(vals, np.float32), names
     for grp, tag in ((G1, 'g1'), (G2, 'g2')):
         yy = y[g == grp] / mech.s
-        _, ctx = _pm_group_features(y[g == grp], mech.s)
+        _, ctx = pm_group_features(y[g == grp], mech.s)
         hist = np.histogram(yy, bins=n_bins, range=(-1, 1))[0] / max(len(yy), 1)
         vals += list(ctx) + list(hist)
         names += [f'{tag}_{c}' for c in PM_CONTEXT_NAMES] + [f'{tag}_hist{n_bins}_{i}' for i in range(n_bins)]

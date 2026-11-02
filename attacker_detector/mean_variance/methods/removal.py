@@ -1,6 +1,4 @@
 """Detect-and-remove: per-report classifier (MLP or FT-Transformer), then standard aggregation.
-
-Both architectures use exactly the same feature schema (features.report_features).
 Training:
   * up to `reports_per_round` reports sampled per round; each row is weighted by
     1 / (rows of its round), so every round counts equally whatever its size
@@ -59,7 +57,6 @@ class ClassifierRemoval(Method):
         self.model_kwargs = model_kwargs or {}
         self.history = []
 
-    # ------------------------------------------------------------ data
     def _rows(self, rounds, rng, cap):
         X, y, w = [], [], []
         for r in rounds:
@@ -85,7 +82,6 @@ class ClassifierRemoval(Method):
                 out.append(torch.sigmoid(self.model(Z[i:i + 8192].to(self.device))).squeeze(-1).cpu().numpy())
         return np.concatenate(out) if out else np.empty(0)
 
-    # ------------------------------------------------------------ fit
     def fit(self, train, val):
         rng = np.random.default_rng(self.seed)
         X, y, w = self._rows(train, rng, self.reports_per_round)
@@ -148,7 +144,6 @@ class ClassifierRemoval(Method):
         self.val_utility_ = res
         self.scales_ = scales.state()
 
-    # ------------------------------------------------------------ predict
     def _aggregate(self, obs, scores, threshold):
         tf = Transform(*obs['domain'], square_mode=obs['square_mode'])
         mech = get_mechanism(obs['protocol'], obs['epsilon'])
