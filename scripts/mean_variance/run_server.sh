@@ -21,6 +21,8 @@
 #   setfeat    optional, after breadth: Deep Sets / Set Transformer with richer observation-only inputs
 #              (feature views 'context', PM+SR; 'context_report', PM) on breadth's rounds, then
 #              compare_setfeat.py (paired vs the 'minimal' breadth models; logs/setfeat_compare.log) [GPU]
+#   budget_extra  optional, after budget: FT-Transformer removal and Deep Sets with group context on the
+#              budget ladder, their frozen checkpoints on the below-budget rounds, then asr      [GPU]
 #   asr        after budget and breadth: attack success before / after each defence, kept share of hits,
 #              MSE and utility gain, from per_round files (attack_success.py ->
 #              <experiment>/attack_success.csv.gz, a few MB; copy these to plot locally)    [CPU]
@@ -179,6 +181,14 @@ stage_budget () {
 }
 
 stage_breadth () { grid "$C/breadth.yaml" breadth; }
+
+# FT removal and Deep Sets (group context) on the budget ladder; frozen on below-budget rounds; then ASR
+stage_budget_extra () {
+  eval_sharded "$C/budget_sweep_setfeat.yaml" budget_sweep_setfeat || return 1
+  job below_budget_extra_frozen run evaluate-frozen --config "$C/below_budget.yaml" \
+      --checkpoints "$R/budget_sweep/checkpoints" --methods ft_removal deepsets_recovery_context || return 1
+  stage_asr
+}
 
 # mech-feature ablation on breadth's PM rounds (needs breadth generate), then the paired comparison
 stage_mech () {

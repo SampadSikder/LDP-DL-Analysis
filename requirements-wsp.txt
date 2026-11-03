@@ -1,0 +1,8 @@
+# Extra packages for the WSP add-on (install into a CLONE of the attacker-detector env, not the env itself).
+# Versions tested locally 2026-11-02.
+langgraph==1.2.19
+langchain-core==1.7.4
+langchain-openai==1.7.3
+openai==3.42.1
+python-dotenv==1.2.4
+pyyaml

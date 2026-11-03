@@ -1,0 +1,7 @@
+# Adds the two methods the budget ladder did not run: FT-Transformer removal and Deep Sets with group
+# context (feature view 'context', see breadth_setfeat.yaml). Same experiment name, rounds, seed and
+# training settings as budget_sweep.yaml, so the new units sit next to the existing ones and nothing is
+# overwritten. Run after `budget`:  bash scripts/mean_variance/run_server.sh budget_extra
+# (trains these on the ladder, scores their frozen checkpoints on the below-budget rounds, then reruns asr).
+extends: budget_sweep.yaml
+methods: [ft_removal, deepsets_recovery_context]
