@@ -29,6 +29,16 @@
 #   WSP_TOKEN_CAP=633000000). It is read by Python only; this script never prints it.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
+missing=()
+for f in requirements-wsp.txt attacker_detector/wsp/agent.py configs/wsp/sweep.yaml scripts/wsp/_common.py \
+         scripts/wsp/check_api.py scripts/wsp/eval_wsp.py scripts/wsp/cost_report.py scripts/wsp/compare_wsp.py \
+         tests/wsp/test_core.py; do
+  [[ -e $f ]] || missing+=("$f")
+done
+if (( ${#missing[@]} )); then
+  echo "run_wsp_server.sh: checkout at $(pwd) is missing WSP files:"; printf '  %s\n' "${missing[@]}"
+  echo "fix: commit + push them from your machine, then 'git pull' here"; exit 1
+fi
 
 CONDA_BASE=${CONDA_BASE:-/home/boby/miniconda3}
 BASE_ENV=${BASE_ENV:-attacker-detector}
