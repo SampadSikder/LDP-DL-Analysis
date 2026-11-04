@@ -187,6 +187,12 @@ def main(workdir):
                 STATE['WS'] = _readonly(_load(msg['start']))
                 _fresh_namespace()
                 res = {'ok': True}
+                if msg.get('staged'):           # staged edit kept on disk between separate CLI calls
+                    S = _load(msg['staged'])
+                    same = set(S) == set(STATE['W0']) and all(S[k].shape == a.shape for k, a in STATE['W0'].items())
+                    if same:
+                        NS['W'] = {k: np.array(S[k], dtype=np.float32, copy=True) for k in STATE['W0']}
+                    res['staged'] = 'loaded' if same else 'ignored (keys or shapes differ from committed)'
             elif op == 'commit':                # committed weights changed: reset staged to them
                 STATE['W0'] = _readonly(_load(msg['weights']))
                 NS['W0'] = STATE['W0']

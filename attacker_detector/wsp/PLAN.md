@@ -14,7 +14,17 @@ Status: built 2026-11-02 (run instructions: `scripts/wsp/README.md`). Difference
 - Resume uses the run's own state files (`state.json`, `latest.npz`, `edits.jsonl`), not a LangGraph
   SQLite checkpointer; a resumed agent starts a new conversation with the edit log.
 - Fine-tune baseline skips the sparsity caps (gradient steps change every weight); same gate otherwise.
-- Tests use `unittest` (as tests/mean_variance), 35 tests, no API calls.
+- Tests use `unittest` (as tests/mean_variance), 42 tests, no API calls.
+- **Codex mode (2026-11-03), used because there are no API credits.** Codex (ChatGPT plan) is the agent, on
+  the user's machine.
+  - The server exports per run the Stage-1 weights plus exactly the probe subset and the validation data
+    (`codex.py export_bundle`; no other training data, no test data).
+  - `scripts/wsp/wspctl` exposes the same tools, gate, caps and budgets, one shell command at a time.
+  - Tokens are attributed per run from Codex session logs, along with the weekly-limit %. `$` is the API
+    list-price equivalent.
+  - The integrity rules (no direct data access, no torch) are instructions plus a post-run audit of
+    Codex's commands, not a hard sandbox. Report that in the paper.
+  - Finished runs go back to the server for `eval` / `report`.
 
 ---
 

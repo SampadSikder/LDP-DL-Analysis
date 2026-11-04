@@ -42,7 +42,10 @@ def collect(jobs):
                      'edits_submitted': w['edits_submitted'], 'edits_accepted': w['edits_accepted'],
                      'llm_calls': llm['calls'], 'input_tokens': llm['input'], 'cached_tokens': llm['cached'],
                      'output_tokens': llm['output'], 'reasoning_tokens': llm['reasoning'], 'total_tokens': llm['total'],
-                     'usd': llm['usd'], 'llm_wait_s': llm['wait_s'], 'probe_evals': h['probe_evals'],
+                     'usd': llm['usd'], 'llm_wait_s': llm['wait_s'],
+                     'agent': llm.get('agent', 'api' if j['mode'] == 'wsp' else None), 'model': llm.get('model'),
+                     'effort': llm.get('effort'), 'weekly_pct_used': (llm.get('weekly_pct') or {}).get('used'),
+                     'probe_evals': h['probe_evals'],
                      'gate_evals': h['gate_evals'], 'stage2_forward_flops': h['forward_flops'],
                      'finetune_steps': h['train_steps'], 'finetune_flops': h['train_flops'],
                      'stage2_compute_s': h.get('compute_s', h.get('gpu_s')), 'sandbox_s': h['sandbox_s'], 'stage2_wall_s': c['elapsed_s'],
@@ -78,6 +81,12 @@ def main():
         wall_min=('stage2_wall_s', lambda s: s.mean() / 60), compute_s=('stage2_compute_s', 'mean'),
         stage1_wall_min=('stage1_wall_s', lambda s: s.mean() / 60))
     print(g.round(1).to_string())
+    cx = df[df['agent'] == 'codex']
+    if len(cx):
+        pairs = sorted({f'{m}/{e}' for m, e in zip(cx['model'].fillna('?'), cx['effort'].fillna('?'))})
+        print(f"codex: {len(cx)} runs, {int(cx['total_tokens'].sum()):,} tokens "
+              f"({cx['total_tokens'].mean():,.0f}/run), weekly limit used ~{cx['weekly_pct_used'].fillna(0).sum():.1f} "
+              f"points, model/effort {pairs}; usd = API list-price equivalent (the ChatGPT plan pays)")
     print(f'written: {out}')
     if args.pilot:
         p = df[(df['mode'] == 'wsp') & df['job'].isin([j['id'] for j in jobs.values() if j.get('pilot')])]

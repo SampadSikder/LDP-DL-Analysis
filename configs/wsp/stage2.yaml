@@ -36,3 +36,6 @@ finetune:
   lr_scale: 0.1                # fine-tune lr = Stage-1 lr x this
 random:
   sigmas: [0.02, 0.05, 0.1, 0.2]   # noise std as a multiple of the tensor's std
+codex:                         # Codex as the agent (ChatGPT plan, no API key): scripts/wsp/wspctl, WSP_TASK.md
+  weekly_pct_cap: 50           # no new run once WSP has used this many points of the weekly limit (per week)
+  device: cpu                  # local device for probes / gate (WSP_DEVICE overrides: cpu, mps, cuda)

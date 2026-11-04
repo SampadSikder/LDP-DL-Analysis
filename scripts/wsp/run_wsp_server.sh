@@ -2,18 +2,29 @@
 # Weight-space programming (WSP) add-on on the lab server. Every stage is resumable: re-run the same command
 # after a crash or kill and finished work is skipped. Existing code and results are only read.
 #
-#   bash scripts/wsp/run_wsp_server.sh setup                 # once: clone the conda env, install LangChain packages
-#   nohup bash scripts/wsp/run_wsp_server.sh all > /dev/null 2>&1 &      # everything up to the pilot, then stops
-#   tail -f results/wsp/run_wsp_server.log
-#   bash scripts/wsp/run_wsp_server.sh wsp eval report       # after you approve the pilot numbers
+#   bash scripts/wsp/run_wsp_server.sh setup                 # once: clone the conda env, install packages
 #
-# Stages (`all` = preflight stage1_mv stage1_freq baselines pilot):
+# Codex mode (no API key; Codex on your own machine is the agent, see scripts/wsp/codex/WSP_TASK.md):
+#   nohup bash scripts/wsp/run_wsp_server.sh train > /dev/null 2>&1 &    # Stage 1 + Codex bundle + baselines
+#   ... copy results/wsp_codex_bundle.tar.gz to your machine, run Codex, copy codex_results_*.tar.gz back ...
+#   nohup bash scripts/wsp/run_wsp_server.sh import_codex eval report > /dev/null 2>&1 &
+# API mode (needs OpenAI API credits and .env):
+#   nohup bash scripts/wsp/run_wsp_server.sh all > /dev/null 2>&1 &      # everything up to the pilot, then stops
+#   bash scripts/wsp/run_wsp_server.sh wsp eval report       # after you approve the pilot numbers
+#   tail -f results/wsp/run_wsp_server.log
+#
+# Stages (`train` = check stage1_mv stage1_freq codex_export baselines;
+#         `all` = preflight stage1_mv stage1_freq baselines pilot):
 #   setup        conda env clone ($ENV_NAME) of attacker-detector + requirements-wsp.txt (original env untouched)
-#   preflight    .env present and git-ignored, packages, WSP unit tests, one tiny API call (check_api.py)
+#   check        packages, breadth rounds, WSP unit tests (no .env, no API)
+#   preflight    check + .env present and git-ignored + one tiny API call (check_api.py)              [API]
 #   stage1_mv    mean/variance Stage 1: existing run.py evaluate, configs/wsp/stage1_mv.yaml (<= 50 epochs),
 #                on breadth's rounds (linked read-only), sharded over GPUs                              [GPU]
 #   stage1_freq  frequency-oracle Stage 1: main.py (unchanged) for seeds 43 / 44 (seed 42 = existing runs),
 #                then verify every run reproduces its saved test F1 and cache train/val arrays          [GPU]
+#   codex_export Stage-1 weights + probe / validation data per run -> results/wsp_codex_bundle.tar.gz
+#                (CODEX_EXPORT_ARGS="--pilot" for the 2 pilot runs only)                              [GPU]
+#   import_codex unpack codex_results_*.tar.gz (repo root or results/wsp_codex/) into the stage2 folders
 #   baselines    gated gradient fine-tune + gated random edit search on tier A (no tokens)            [GPU]
 #   pilot        the 2 pilot LLM runs, then cost_report.py --pilot: tokens/run, projected total vs cap  [API]
 #   wsp          every tier-A LLM run (WSP_CONCURRENCY in parallel; stops launching at 90% of the cap) [API]
@@ -32,7 +43,7 @@ cd "$(dirname "$0")/../.." || exit 1
 missing=()
 for f in requirements-wsp.txt attacker_detector/wsp/agent.py configs/wsp/sweep.yaml scripts/wsp/_common.py \
          scripts/wsp/check_api.py scripts/wsp/eval_wsp.py scripts/wsp/cost_report.py scripts/wsp/compare_wsp.py \
-         tests/wsp/test_core.py; do
+         scripts/wsp/export_codex.py attacker_detector/wsp/codex.py tests/wsp/test_core.py tests/wsp/test_codex.py; do
   [[ -e $f ]] || missing+=("$f")
 done
 if (( ${#missing[@]} )); then
@@ -87,15 +98,21 @@ stage_setup () {
 print('langgraph ok; torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 }
 
-stage_preflight () {
+stage_check () {
   need_py || return 1
-  say "python $PY | GPUs $NGPU | CPUs $NCPU | RAM ${RAM_GB} GB | shards $SHARDS x $THREADS threads | LLM runs in parallel $WSP_CONCURRENCY"
+  say "python $PY | GPUs $NGPU | CPUs $NCPU | RAM ${RAM_GB} GB | shards $SHARDS x $THREADS threads"
+  "$PY" -c "import yaml, psutil, pyarrow, torch" || { say "packages missing: run setup"; return 1; }
+  [[ -d results/mean_variance_server/breadth/rounds ]] || { say "breadth rounds missing (results/mean_variance_server/breadth/rounds)"; return 1; }
+  if [[ ${SKIP_TESTS:-0} != 1 ]]; then job wsp_tests "$PY" -m unittest discover -s tests/wsp -t . || return 1; fi
+}
+
+stage_preflight () {
+  stage_check || return 1
+  say "LLM runs in parallel $WSP_CONCURRENCY"
   [[ -f .env ]] || { say ".env missing at $(pwd)/.env (OPENAI_API_KEY, WSP_MODEL, WSP_REASONING_EFFORT, WSP_TOKEN_CAP)"; return 1; }
   git check-ignore -q .env || { say ".env is NOT git-ignored -- refusing to run"; return 1; }
   chmod 600 .env
-  "$PY" -c "import langgraph, langchain_openai, dotenv, yaml, psutil, pyarrow" || { say "packages missing: run setup"; return 1; }
-  [[ -d results/mean_variance_server/breadth/rounds ]] || { say "breadth rounds missing (results/mean_variance_server/breadth/rounds)"; return 1; }
-  if [[ ${SKIP_TESTS:-0} != 1 ]]; then job wsp_tests "$PY" -m unittest discover -s tests/wsp -t . || return 1; fi
+  "$PY" -c "import langgraph, langchain_openai, dotenv" || { say "packages missing: run setup"; return 1; }
   if [[ ${SKIP_API_CHECK:-0} != 1 ]]; then job check_api "$PY" scripts/wsp/check_api.py || return 1; tail -3 "$LOGS/check_api.log" | sed 's/^/    /'; fi
 }
 
@@ -128,6 +145,31 @@ stage_stage1_freq () {
   job stage1_freq_train "$PY" scripts/wsp/stage1_freq.py train --jobs "$(( NGPU > 0 ? NGPU : 1 ))" --gpus "$GPUS_CSV" || return 1
   CUDA_VISIBLE_DEVICES=${GPUS_CSV%%,*} job stage1_freq_verify "$PY" scripts/wsp/stage1_freq.py verify || return 1
   grep -E '^(OK|MISMATCH)' "$LOGS/stage1_freq_verify.log" | tail -15 | sed 's/^/    /'
+}
+
+stage_codex_export () {
+  need_py || return 1
+  # shellcheck disable=SC2086
+  CUDA_VISIBLE_DEVICES=${GPUS_CSV%%,*} job codex_export "$PY" scripts/wsp/export_codex.py ${CODEX_EXPORT_ARGS:-} || return 1
+  tail -1 "$LOGS/codex_export.log" | sed 's/^/    /'
+  tar czf results/wsp_codex_bundle.tar.gz.tmp results/wsp_codex/bundle && mv results/wsp_codex_bundle.tar.gz.tmp results/wsp_codex_bundle.tar.gz || return 1
+  say "bundle ready: $(pwd)/results/wsp_codex_bundle.tar.gz ($(du -h results/wsp_codex_bundle.tar.gz | cut -f1))"
+  say "on your machine, at the repo root:  scp <server>:$(pwd)/results/wsp_codex_bundle.tar.gz results/ && tar xzf results/wsp_codex_bundle.tar.gz"
+}
+
+stage_import_codex () {
+  need_py || return 1
+  local f n=0
+  shopt -s nullglob
+  for f in codex_results_*.tar.gz results/codex_results_*.tar.gz results/wsp_codex/codex_results_*.tar.gz; do
+    if tar tzf "$f" | grep -qvE '^results/' || tar tzf "$f" | grep -qE '(^|/)\.\.(/|$)'; then
+      say "refusing $f: it has paths outside results/"; return 1
+    fi
+    tar xzf "$f" && say "unpacked $f" && n=$(( n + 1 ))
+  done
+  shopt -u nullglob
+  (( n > 0 )) || { say "no codex_results_*.tar.gz in $(pwd) or results/ -- copy it from your machine first"; return 1; }
+  "$PY" scripts/wsp/run_wsp.py list --mode wsp 2>&1 | tail -1 | sed 's/^/    /'
 }
 
 stage_baselines () {
@@ -182,6 +224,16 @@ stage_tier_b () {
   need_py || return 1
   WSP_CONCURRENCY=$(( NGPU > 0 ? 2 * NGPU : 2 )) job tier_b_baselines "$PY" scripts/wsp/sweep.py baselines --set tier_b || return 1
   job tier_b_wsp "$PY" scripts/wsp/sweep.py wsp --set tier_b
+}
+
+stage_train () {
+  stage_check || return 1
+  stage_stage1_mv || return 1
+  stage_stage1_freq || return 1
+  stage_codex_export || return 1
+  stage_baselines || return 1
+  say "TRAIN DONE. Bundle: results/wsp_codex_bundle.tar.gz. After the Codex runs:"
+  say "    nohup bash scripts/wsp/run_wsp_server.sh import_codex eval report > /dev/null 2>&1 &"
 }
 
 stage_all () {

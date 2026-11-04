@@ -8,7 +8,6 @@ import re
 import time
 
 import numpy as np
-from pydantic import BaseModel, Field
 
 from .gate import cap_problems, decide, edit_stats
 from .log import dumps
@@ -57,41 +56,77 @@ def _parse_index(index):
     return tuple(out)
 
 
-class ModelCardArgs(BaseModel):
-    pass
+def _schemas():
+    """Argument schemas of the LangChain tools (pydantic is only needed for the API agent)."""
+    from pydantic import BaseModel, Field
+
+    class ModelCardArgs(BaseModel):
+        pass
 
 
-class TensorStatsArgs(BaseModel):
-    names: list[str] = Field(default_factory=list, description='tensor names; empty = all tensors')
-    staged: bool = Field(False, description='true = your staged weights in the sandbox, false = committed')
+    class TensorStatsArgs(BaseModel):
+        names: list[str] = Field(default_factory=list, description='tensor names; empty = all tensors')
+        staged: bool = Field(False, description='true = your staged weights in the sandbox, false = committed')
 
 
-class ReadTensorArgs(BaseModel):
-    name: str = Field(description='tensor name')
-    index: str = Field('', description="numpy-style index, e.g. '0:4, :' or '3' (integers, ':' and ',' only)")
-    staged: bool = Field(False, description='true = staged weights, false = committed')
+    class ReadTensorArgs(BaseModel):
+        name: str = Field(description='tensor name')
+        index: str = Field('', description="numpy-style index, e.g. '0:4, :' or '3' (integers, ':' and ',' only)")
+        staged: bool = Field(False, description='true = staged weights, false = committed')
 
 
-class PythonArgs(BaseModel):
-    code: str = Field(description='Python code (numpy only). Edit W[name] in place to stage an edit.')
+    class PythonArgs(BaseModel):
+        code: str = Field(description='Python code (numpy only). Edit W[name] in place to stage an edit.')
 
 
-class ProbeArgs(BaseModel):
-    kind: str = Field('metrics', description="'metrics' (per-slice table), 'errors' (worst cases), "
-                                             "'activations' (per-layer unit statistics)")
-    weights: str = Field('staged', description="'staged' (your edit, compared with committed) or 'committed'")
+    class ProbeArgs(BaseModel):
+        kind: str = Field('metrics', description="'metrics' (per-slice table), 'errors' (worst cases), "
+                                                 "'activations' (per-layer unit statistics)")
+        weights: str = Field('staged', description="'staged' (your edit, compared with committed) or 'committed'")
 
 
-class SubmitArgs(BaseModel):
-    rationale: str = Field(description='what the staged edit changes and why it should help (1-3 sentences)')
+    class SubmitArgs(BaseModel):
+        rationale: str = Field(description='what the staged edit changes and why it should help (1-3 sentences)')
 
 
-class FinishArgs(BaseModel):
-    summary: str = Field(description='what you found and changed, and why you stop')
+    class FinishArgs(BaseModel):
+        summary: str = Field(description='what you found and changed, and why you stop')
+
+    return {'model_card': ModelCardArgs, 'tensor_stats': TensorStatsArgs, 'read_tensor': ReadTensorArgs,
+            'python': PythonArgs, 'probe': ProbeArgs, 'submit_edit': SubmitArgs, 'history': ModelCardArgs,
+            'finish': FinishArgs}
+
+
+TOOL_DOCS = {
+    'model_card': 'Task, architecture, inputs, metric, tensor names/shapes, committed validation metrics, budget '
+                  'left and gate rules. Free.',
+    'tensor_stats': 'Summary statistics per tensor (2-D: top singular values, stable rank, row norms). Free.',
+    'read_tensor': 'Raw values of a slice of one tensor (max 2048 values). Free.',
+    'python': 'Run numpy code in a persistent sandbox. W = staged weights (edit in place), W0 = committed, WS = '
+              'Stage-1 start (read-only). Helpers: names(), diff(), revert(name=None). No data, no torch, no files, '
+              'no network. Free.',
+    'probe': 'Forward pass on a fixed subset of TRAINING data. With staged weights the result includes the change '
+             'against committed weights. Costs 1 probe.',
+    'submit_edit': 'Gate the staged weights on VALIDATION data. Kept only if within the edit caps, reliably better '
+                   '(paired bootstrap) and no guard metric worse. Costs 1 gate evaluation. Rejected edits stay '
+                   'staged; call revert() in python to reset.',
+    'history': 'Your submitted edits with verdicts, and probes so far. Free.',
+    'finish': 'End the run when no further gain is likely or the budget is spent.',
+}
 
 
 def make_tools(ctx):
     """(LangChain tools, {name: callable}) bound to one run context."""
+    from langchain_core.tools import StructuredTool
+    fns = tool_functions(ctx)
+    schemas = _schemas()
+    tools = [StructuredTool.from_function(func=fns[n], name=n, description=d, args_schema=schemas[n])
+             for n, d in TOOL_DOCS.items()]
+    return tools, fns
+
+
+def tool_functions(ctx):
+    """{name: callable} bound to one run context (no LangChain needed; the Codex CLI uses these directly)."""
     cap = ctx.cfg['agent']['tool_output_chars']
 
     def model_card():
@@ -168,43 +203,22 @@ def make_tools(ctx):
         ctx.finish_summary = summary
         return 'Run finished. The committed weights are final.'
 
-    fns = {'model_card': model_card, 'tensor_stats': tensor_stats, 'read_tensor': read_tensor, 'python': python,
-           'probe': probe, 'submit_edit': submit_edit, 'history': history, 'finish': finish}
-    docs = {
-        'model_card': (ModelCardArgs, 'Task, architecture, inputs, metric, tensor names/shapes, committed '
-                                      'validation metrics, budget left and gate rules. Free.'),
-        'tensor_stats': (TensorStatsArgs, 'Summary statistics per tensor (2-D: top singular values, stable rank, '
-                                          'row norms). Free.'),
-        'read_tensor': (ReadTensorArgs, 'Raw values of a slice of one tensor (max 2048 values). Free.'),
-        'python': (PythonArgs, 'Run numpy code in a persistent sandbox. W = staged weights (edit in place), W0 = '
-                               'committed, WS = Stage-1 start (read-only). Helpers: names(), diff(), revert(name=None). '
-                               'No data, no torch, no files, no network. Free.'),
-        'probe': (ProbeArgs, 'Forward pass on a fixed subset of TRAINING data. With staged weights the result '
-                             'includes the change against committed weights. Costs 1 probe.'),
-        'submit_edit': (SubmitArgs, 'Gate the staged weights on VALIDATION data. Kept only if within the edit caps, '
-                                    'reliably better (paired bootstrap) and no guard metric worse. Costs 1 gate '
-                                    'evaluation. Rejected edits stay staged; call revert() in python to reset.'),
-        'history': (ModelCardArgs, 'Your submitted edits with verdicts, and probes so far. Free.'),
-        'finish': (FinishArgs, 'End the run when no further gain is likely or the budget is spent.'),
-    }
-    from langchain_core.tools import StructuredTool
-    tools = [StructuredTool.from_function(func=fns[n], name=n, description=d, args_schema=schema)
-             for n, (schema, d) in docs.items()]
-    return tools, fns
+    return {'model_card': model_card, 'tensor_stats': tensor_stats, 'read_tensor': read_tensor, 'python': python,
+            'probe': probe, 'submit_edit': submit_edit, 'history': history, 'finish': finish}
 
 
 class RunState:
     """Mutable state of one run, shared by tools, agent and baseline loops."""
 
     def __init__(self, adapter, budget, cost, log, cfg, gate_cfg, W_start, W_cur, cur_val, sandbox=None,
-                 on_commit=None, on_save=None, val_stage1=None):
+                 on_commit=None, on_save=None, val_stage1=None, card=None):
         self.adapter, self.budget, self.cost, self.log = adapter, budget, cost, log
         self.cfg, self.gate_cfg = cfg, gate_cfg
         self.W_start, self.W_cur, self.cur_val = W_start, W_cur, cur_val
         self.sandbox = sandbox
         self.on_commit, self.on_save = on_commit, on_save
         self.val_stage1 = val_stage1
-        self.card = adapter.describe()
+        self.card = card if card is not None else adapter.describe()
         self.gate_rules = {k: gate_cfg[k] for k in ('max_changed_frac', 'max_rel_l2', 'confidence', 'guard_tol')}
         self.edits, self.probes = [], []
         self.finished, self.finish_summary = False, ''

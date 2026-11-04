@@ -8,7 +8,74 @@ This is an add-on. No existing file is changed. Existing results are only read. 
 `attacker_detector/wsp/`, `scripts/wsp/`, `configs/wsp/`, `tests/wsp/`, `requirements-wsp.txt` and the
 `results/*wsp*` folders.
 
-## On the server
+## Codex mode (no API credits)
+
+Codex on your own machine is the agent, and your ChatGPT plan pays for it. The server trains Stage 1 and
+exports a bundle: for every run, the Stage-1 weights plus exactly the probe (training subset) and validation
+data the harness uses. It contains no other training data and no test data. Codex edits the weights through
+`scripts/wsp/wspctl`, which enforces the same gate, caps and budgets as the API agent. The finished runs go back
+to the server for test evaluation.
+
+### 1. Server: train and export
+
+```bash
+git pull
+nohup bash scripts/wsp/run_wsp_server.sh train > /dev/null 2>&1 &
+tail -f results/wsp/run_wsp_server.log
+```
+
+`train` runs `check`, `stage1_mv`, `stage1_freq`, `codex_export` and `baselines`. Wait for the line
+`bundle ready: results/wsp_codex_bundle.tar.gz`. The baselines keep running after that, so you can start Codex
+right away.
+
+### 2. Your machine: Codex runs
+
+At the repo root:
+
+```bash
+scp <server>:<repo>/results/wsp_codex_bundle.tar.gz results/
+tar xzf results/wsp_codex_bundle.tar.gz          # -> results/wsp_codex/bundle/
+scripts/wsp/wspctl queue                         # 87 runs, pilots first
+```
+
+In Codex, choose the model (GPT-6 Astra) and reasoning effort (Extra high), then paste:
+
+> Read scripts/wsp/codex/WSP_TASK.md and follow it. Do the first 2 runs with scripts/wsp/wspctl next, then stop.
+
+That's the pilot. Run `scripts/wsp/wspctl tokens` to see tokens per run and how much of the weekly limit each
+used. For the rest, paste the same prompt with "until the queue is empty or the weekly limit stops you" instead
+of "the first 2 runs". Then:
+
+```bash
+scripts/wsp/wspctl pack                          # -> results/wsp_codex/codex_results_<time>.tar.gz
+scp results/wsp_codex/codex_results_*.tar.gz <server>:<repo>/results/
+```
+
+### 3. Server: test evaluation and report
+
+```bash
+nohup bash scripts/wsp/run_wsp_server.sh import_codex eval report > /dev/null 2>&1 &
+```
+
+### Notes
+
+- **Tokens:** read from Codex's session logs (`~/.codex/sessions/**/rollout-*.jsonl`).
+  - Every model response's usage (input, cached, output, reasoning) is assigned to the run that was active.
+    The lead-in after your prompt counts toward the first run, and Codex's closing message toward the last.
+  - The weekly-limit % comes from the same log.
+  - `usd` in `cost.json` is the API list-price equivalent from `configs/wsp/pricing.yaml`; the plan pays the
+    real cost.
+- **Weekly cap:** `wspctl next` refuses new runs once WSP has used `codex.weekly_pct_cap` (50) points of the
+  week's limit (`configs/wsp/stage2.yaml`).
+- **Audit:** each run's `audit.json` lists the commands Codex ran and flags direct reads of bundle or run
+  files, and any torch or gradient code. Check the flag count in `wspctl tokens` / `pack`.
+- **Device:** probes and gate evaluations run on the CPU by default. `WSP_DEVICE=mps` tries the Apple GPU.
+- **Python:** `WSP_PY` picks the Python for `wspctl`. By default it uses the conda env `ldp-attacker-detector`
+  (torch, numpy, pandas, yaml, psutil; no LangChain needed).
+- **Smaller bundle:** `CODEX_EXPORT_ARGS="--pilot" bash scripts/wsp/run_wsp_server.sh codex_export` exports
+  only the 2 pilot runs.
+
+## API mode: on the server
 
 ```bash
 git pull                                              # code only; results/ and datasets/ stay as they are

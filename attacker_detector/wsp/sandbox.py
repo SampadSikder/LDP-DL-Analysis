@@ -130,13 +130,18 @@ class Sandbox:
         self._call({'op': 'init', 'weights': self.committed_path, 'start': self.start_path}, timeout=120)
 
     # ---------------------------------------------------------------- API
-    def start(self, committed: dict, start: dict):
+    def start(self, committed: dict, start: dict, staged_path=None):
+        """staged_path: optional .npz of staged weights to resume from (used by the Codex CLI)."""
         save_npz(self.committed_path, committed)
         save_npz(self.start_path, start)
         self._spawn()
-        r = self._call({'op': 'init', 'weights': self.committed_path, 'start': self.start_path}, timeout=120)
+        msg = {'op': 'init', 'weights': self.committed_path, 'start': self.start_path}
+        if staged_path and os.path.exists(staged_path):
+            msg['staged'] = os.path.abspath(staged_path)
+        r = self._call(msg, timeout=120)
         if not r.get('ok'):
             raise RuntimeError(f"sandbox init failed: {r}")
+        self.init_note = r.get('staged')
         return self
 
     def exec(self, code: str) -> dict:
