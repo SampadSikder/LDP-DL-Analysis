@@ -149,6 +149,25 @@ def export_bundle(jobs, sweep_cfg, s2, device, out=None, log=print, force=False)
     return man
 
 
+def stage1_ready(job, sweep_cfg):
+    """True when the job's Stage-1 training has finished, so it can be exported while other units still train.
+    Mean/variance: units/<key>.done.json says 'completed' and the checkpoint exists. Frequency oracle: main.py's
+    last output (sensitivity_test_results.csv) and model.pt exist."""
+    if job['kind'] == 'mv':
+        from .runner import mv_context
+        ctx = mv_context(sweep_cfg)
+        done = os.path.join(ctx.out_dir, 'units', job['unit'] + '.done.json')
+        if not (os.path.exists(done) and os.path.exists(os.path.join(ctx.checkpoint(job['unit']), 'state.json'))):
+            return False
+        try:
+            return _json(done).get('status') == 'completed'
+        except ValueError:                       # being written right now
+            return False
+    spec = job['spec']
+    return (os.path.exists(os.path.join(spec['stage1_dir'], 'sensitivity_test_results.csv'))
+            and os.path.exists(spec['model_path']))
+
+
 def bundle_manifest():
     p = os.path.join(bundle_dir(), 'manifest.json')
     if not os.path.exists(p):

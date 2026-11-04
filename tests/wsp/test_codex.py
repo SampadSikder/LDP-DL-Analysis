@@ -238,6 +238,26 @@ class TestBundle(unittest.TestCase):
                 else:
                     np.testing.assert_array_equal(loc.data['probe'][0], srv.data['probe'][0])
 
+    def test_stage1_ready(self):
+        from attacker_detector.wsp import runner
+        self.ctx.out_dir = os.path.join(self.tmp, 'stage1')
+        done, todo = self.jobs
+        os.makedirs(os.path.join(self.ctx.out_dir, 'units'), exist_ok=True)
+        with open(os.path.join(self.ctx.out_dir, 'units', done['unit'] + '.done.json'), 'w') as f:
+            json.dump({'status': 'completed'}, f)
+        with open(os.path.join(self.ctx.out_dir, 'units', todo['unit'] + '.done.json'), 'w') as f:
+            f.write('{"stat')                                            # being written
+        fdir = os.path.join(self.tmp, 'freq_s1')
+        os.makedirs(fdir, exist_ok=True)
+        fj = {'kind': 'freq', 'spec': {'stage1_dir': fdir, 'model_path': os.path.join(fdir, 'model.pt')}}
+        with mock.patch.object(runner, 'mv_context', lambda cfg: self.ctx):
+            self.assertTrue(cx.stage1_ready(done, None))
+            self.assertFalse(cx.stage1_ready(todo, None))
+            self.assertFalse(cx.stage1_ready(fj, None))
+            for name in ('model.pt', 'sensitivity_test_results.csv'):
+                open(os.path.join(fdir, name), 'w').close()
+            self.assertTrue(cx.stage1_ready(fj, None))
+
     def test_no_test_or_extra_training_data(self):
         from attacker_detector.mean_variance.store import RoundStore
         st = RoundStore(os.path.join(self.bundle, 'mv', 'rounds'))
