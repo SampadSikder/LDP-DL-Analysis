@@ -1,9 +1,0 @@
-# Mechanism-fit feature ablation: MLP / FT removal with base + NNLS-residual features ('mech').
-# PM only (SR has no mech features). Same experiment name and grid as breadth, so it evaluates on
-# breadth's generated rounds and writes its units next to breadth's. Run after breadth `generate`:
-#   bash scripts/mean_variance/run_server.sh mech
-# then compare against mlp_removal / ft_removal with scripts/mean_variance/compare_mech.py.
-# The residuals measure disagreement with a fitted PM mixture, not verified evidence of attackers.
-extends: breadth.yaml
-protocols: [PM]
-methods: [mlp_removal_mech, ft_removal_mech]
