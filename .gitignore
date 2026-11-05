@@ -130,3 +130,7 @@ scripts/wsp/
 configs/wsp/
 tests/wsp/
 requirements-wsp.txt
+docs/mean_variance
+configs/mean_variance
+
+
