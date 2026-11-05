@@ -123,3 +123,10 @@ configs/mean_variance/paper_attack_default_taxi.yaml
 # Local tool settings and scratch notes
 .claude/
 context.md
+
+# --- WSP add-on: local only, not in version control (results already ignored via results/) ---
+attacker_detector/wsp/
+scripts/wsp/
+configs/wsp/
+tests/wsp/
+requirements-wsp.txt
