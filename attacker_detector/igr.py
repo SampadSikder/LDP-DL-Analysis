@@ -294,6 +294,23 @@ def ft_flags(model, X, device, batch=32_768):
     return out
 
 
+# FT-Transformer arguments of the original runs (scripts/run_extra_eps.sh FT array, --feature-set v3)
+FT_SPEC = {'d_token': 64, 'n_heads': 8, 'n_layers': 3, 'ffn_d_multiplier': 1.33,
+           'attention_dropout': 0.1, 'residual_dropout': 0.0}
+
+
+def build_ft(input_dim, spec=None, state_dict=None, device='cpu'):
+    """FT-Transformer as main.py builds it (dropout only matters in training)."""
+    from .models.ft_transformer import FTTransformer
+    spec = FT_SPEC if spec is None else spec
+    kw = {k: spec[k] for k in FT_SPEC if spec.get(k) is not None}
+    model = FTTransformer(input_dim, dropout_rate=spec.get('dropout', 0.2), **kw)
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
+    return model.to(device).eval()
+
+
 def load_ft(model_path, spec, device):
-    from .wsp.adapters import build_freq_model, load_freq_state
-    return build_freq_model(spec, 4, load_freq_state(model_path), device)
+    import torch
+    ck = torch.load(model_path, map_location='cpu')
+    return build_ft(4, spec, ck['model_state_dict'] if 'model_state_dict' in ck else ck, device)

@@ -4,6 +4,7 @@ FIAD vs Diffstats on the same simulated users. Definition and method: attacker_d
 
   python scripts/igr/run_igr.py norms                    # v3 z-score of each training data dir (serial)
   python scripts/igr/run_igr.py run --shard 0 --num-shards 8 --processors 4
+  python scripts/igr/run_igr.py run --baselines diffstats  # skip FIAD (most of the run time)
   python scripts/igr/run_igr.py wsp                      # after Codex: WSP-edited models on cached runs
   python scripts/igr/run_igr.py collect                  # merge + F1 check vs the stored predictions
 
@@ -63,13 +64,25 @@ def wsp_freq():
     return load_yaml(SWEEP)['freq']
 
 
+def wsp_available():
+    """The WSP add-on is optional: without it IGR runs as usual, only the wsp step is unavailable."""
+    try:
+        from attacker_detector.wsp.jobs import SWEEP
+    except ImportError:
+        return False
+    return os.path.exists(SWEEP)
+
+
 def ft_spec():
-    """FT-Transformer arguments of the original runs (scripts/run_extra_eps.sh, as in configs/wsp/sweep.yaml)."""
-    return dict(wsp_freq()['spec'])
+    """FT-Transformer arguments of the original runs (scripts/run_extra_eps.sh)."""
+    return dict(igr.FT_SPEC)
 
 
 def wsp_cells():
-    """(root, cell) pairs the WSP runs are tested on -- cached so edited models can be scored later."""
+    """(root, cell) pairs the WSP runs are tested on -- cached so edited models can be scored later.
+    Empty without the WSP add-on."""
+    if not wsp_available():
+        return set()
     from attacker_detector.wsp.jobs import parse_freq_run
     fc = wsp_freq()
     out = set()
@@ -183,6 +196,18 @@ def _write_rows(path, rows):
     os.replace(path + '.tmp', path)
 
 
+BASELINE_METHODS = ('fiad', 'diffstats')
+
+
+def _finished(out_csv, methods):
+    """The run's CSV exists and has a row for every baseline asked for. A run finished without
+    some baseline is simulated again when that baseline is wanted later, so all of its rows
+    stay on the same users."""
+    if not os.path.exists(out_csv):
+        return False
+    return set(methods) <= set(pd.read_csv(out_csv, usecols=['detector']).detector)
+
+
 def process_run(run, args, models, cache_cells):
     from attacker_detector.baselines import BASELINES
     from attacker_detector.data.generators import extract_user_level_features_diffstats_style
@@ -192,7 +217,8 @@ def process_run(run, args, models, cache_cells):
     out_csv = os.path.join(igr_dir(root), 'runs', cell, igr.run_tag(run) + '.csv')
     cache = (root, cell) in cache_cells
     cache_path = os.path.join(igr_dir(root), 'cache', cell, igr.run_tag(run) + '.npz')
-    if os.path.exists(out_csv) and (not cache or os.path.exists(cache_path)):
+    methods = [m for m in BASELINE_METHODS if m in args.baselines]
+    if _finished(out_csv, methods) and (not cache or os.path.exists(cache_path)):
         return None
 
     design = design_for(root, protocol, run['data_dir'])
@@ -226,7 +252,7 @@ def process_run(run, args, models, cache_cells):
         t1 = time.time()
         rows.append(_row(run, det, rd.metrics(igr.ft_flags(models.get(path), Xm, models.device)),
                          time.time() - t1, variant='original'))
-    for method in ('fiad', 'diffstats'):
+    for method in methods:
         t1 = time.time()
         flagged = np.zeros(n, dtype=bool)
         flagged[np.asarray(BASELINES[method](sup.bits, one_list, run, args.processors), dtype=np.int64)] = True
@@ -300,6 +326,9 @@ def cmd_wsp(args):
     device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
                           else ('cpu' if args.device == 'auto' else args.device))
     models = Models(device)
+    if not wsp_available():
+        say('wsp step needs the WSP add-on (attacker_detector/wsp, configs/wsp/sweep.yaml), not found here')
+        return 1
     root, by_cell = wsp_models()
     n_edit = sum(1 for lst in by_cell.values() for m in lst if m[1] != 'stage1')
     say(f'WSP models: {sum(len(v) for v in by_cell.values())} ({n_edit} edited) over {len(by_cell)} cells of {root}')
@@ -397,6 +426,9 @@ def main():
     ap.add_argument('--device', default='auto')
     ap.add_argument('--cache', choices=['wsp', 'all', 'none'], default='wsp',
                     help='which runs keep reports + features for scoring models later (wsp = cells the WSP runs test on)')
+    ap.add_argument('--baselines', nargs='*', choices=BASELINE_METHODS, default=list(BASELINE_METHODS),
+                    help='baseline detectors scored next to ours (default: both). --baselines diffstats skips '
+                         'FIAD, which takes most of the run time; --baselines with no names scores ours only')
     args = ap.parse_args()
     if args.cmd == 'plan':
         runs = plan(args)

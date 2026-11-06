@@ -25,12 +25,15 @@
 # Env overrides: PY, SHARDS (default 8), PROC (default 4), IGR_GPU (GPU for our model's forward pass,
 #   default 0; empty = CPU), ROOTS (space-separated results roots, default the five *_v3f roots),
 #   REPLICATES (runs per config; default the datasets' held-out count, 1), IGR_ARGS (extra run_igr.py args),
+#   BASELINES (baselines scored next to ours, default "fiad diffstats"; BASELINES=diffstats skips FIAD,
+#   which takes most of the run time; BASELINES= scores ours only; a later run that asks for a baseline
+#   a run lacks re-simulates that run, so all detectors share users),
 #   SKIP_TESTS=1.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 missing=()
 for f in attacker_detector/igr.py scripts/igr/run_igr.py scripts/igr/igr_figures.py tests/igr/test_igr.py \
-         attacker_detector/baselines.py attacker_detector/wsp/adapters.py configs/wsp/sweep.yaml; do
+         attacker_detector/baselines.py; do
   [[ -e $f ]] || missing+=("$f")
 done
 if (( ${#missing[@]} )); then
@@ -54,6 +57,7 @@ export MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/mpl_$USER} PYTHONDONTWRITEBYTECODE=1
 ARGS=()
 [[ -n ${ROOTS:-} ]] && ARGS+=(--roots $ROOTS)
 [[ -n ${REPLICATES:-} ]] && ARGS+=(--replicates "$REPLICATES")
+[[ -n ${BASELINES+set} ]] && ARGS+=(--baselines $BASELINES)
 [[ -n ${IGR_ARGS:-} ]] && ARGS+=($IGR_ARGS)
 
 say () { echo "[$(date '+%F %T')] $*"; }

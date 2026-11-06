@@ -48,12 +48,25 @@ tail -f results/igr_logs/run_igr_server.log
 grep -c "sim " results/igr_logs/run_shard*.log                     # finished runs per shard
 ```
 
+Without FIAD (it takes most of the run time), keeping Diffstats:
+
+```bash
+BASELINES=diffstats SHARDS=16 nohup bash scripts/igr/run_igr_server.sh all > /dev/null 2>&1 &
+```
+
+This scores the saved `model.pt` checkpoints (no training) and Diffstats on the re-simulated held-out
+runs, with the `no_defense` and `oracle` (true-label removal) rows beside them. `BASELINES=` (empty)
+scores our models only. A later `run` that asks for FIAD simulates those runs again, so that every
+detector in a run is scored on the same users.
+
 - `SHARDS` (default 8) sets how many processes run in parallel. `PROC` (default 4) sets threads per shard.
 - FIAD dominates the run time. Its earlier baseline pass took about 26 CPU-hours (4 threads per run) over the four MGA-A roots.
 - Peak memory is roughly 15 GB per shard (emoji: 500k × 1496 reports).
 - Restarting `run` skips the runs already finished.
 
 ### After Codex
+
+IGR does not need the WSP add-on; only this `wsp` step does.
 
 Run this once Codex has finished, `run_wsp_server.sh import_codex` has been run, and the WSP `baselines` stage (fine-tune and random) is done:
 
