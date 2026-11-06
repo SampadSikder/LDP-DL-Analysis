@@ -143,7 +143,6 @@ class TestCLI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import torch
-        from attacker_detector.wsp.adapters import build_freq_model
         cls.tmp = tempfile.mkdtemp()
         cls.results = os.path.join(cls.tmp, 'results')
         cls.data = os.path.join(cls.tmp, 'output', 'fake')
@@ -162,7 +161,7 @@ class TestCLI(unittest.TestCase):
         for sub in ('in_dist/Fire_OUE', 'cross/OUE_Fire_test'):
             d = os.path.join(cls.results, 'fake_v3f', sub)
             os.makedirs(d)
-            torch.save({'model_state_dict': build_freq_model(spec, 4).state_dict()}, os.path.join(d, 'model.pt'))
+            torch.save({'model_state_dict': igr.build_ft(4, spec).state_dict()}, os.path.join(d, 'model.pt'))
             np.savez(os.path.join(d, 'test_predictions.npz'), prob=np.r_[np.full(900, 0.1), np.full(300, 0.9)],
                      label=np.r_[np.zeros(1080), np.ones(120)].astype(np.int8), epsilon=np.full(1200, 1.0, np.float32),
                      attacker_ratio=np.full(1200, 0.1, np.float32), splits=np.full(1200, 4, np.int8),
@@ -188,8 +187,17 @@ class TestCLI(unittest.TestCase):
         self.cli('norms')
         self.assertTrue(os.path.exists(os.path.join(igr_dir, 'v3_norm_OUE.json')))
         self.assertTrue(os.path.exists(os.path.join(igr_dir, 'design_OUE.json')))
-        out = self.cli('run', '--cache', 'all')
+        out = self.cli('run', '--cache', 'all', '--baselines', 'diffstats')        # FIAD skipped
         self.assertIn('ours_cross', out)
+        self.assertNotIn('fiad', out)
+        one = pd.read_csv(os.path.join(igr_dir, 'runs', 'Fire_OUE', 'eps1_b0.1_r10_s4_rep1.csv'))
+        self.assertEqual(sorted(one.detector),
+                         sorted(['no_defense', 'oracle', 'ours_in_dist', 'ours_cross', 'diffstats']))
+        self.assertEqual(self.cli('run', '--cache', 'all', '--baselines', 'diffstats').count('(done)'), 2)
+        self.assertEqual(self.cli('run', '--cache', 'all', '--baselines').count('(done)'), 2)  # ours only: done
+        out = self.cli('run', '--cache', 'all')            # FIAD wanted now: both runs simulated again
+        self.assertEqual(out.count('(done)'), 0)
+        self.assertIn('fiad', out)
         files = sorted(os.listdir(os.path.join(igr_dir, 'runs', 'Fire_OUE')))
         self.assertEqual(files, ['eps0.5_b0.1_r10_s4_rep1.csv', 'eps1_b0.1_r10_s4_rep1.csv'])
         self.assertEqual(len(os.listdir(os.path.join(igr_dir, 'cache', 'Fire_OUE'))), 2)
@@ -214,6 +222,7 @@ class TestCLI(unittest.TestCase):
         # wsp step: models scored on the cached users, nothing simulated again
         mod = igr_script()
         mod.RESULTS = self.results
+        mod.wsp_available = lambda: True                   # the WSP add-on itself is optional
         ck = os.path.join(self.results, 'fake_v3f', 'in_dist', 'Fire_OUE', 'model.pt')
         mod.wsp_models = lambda: ('fake_v3f', {'Fire_OUE': [('ours_in_dist', 'stage1', 43, '', ck, 'in_dist/Fire_OUE'),
                                                             ('ours_in_dist', 'wsp', 43, 25, ck, 'in_dist/Fire_OUE')]})
