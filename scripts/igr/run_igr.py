@@ -9,7 +9,9 @@ FIAD vs Diffstats on the same simulated users. Definition and method: attacker_d
   python scripts/igr/run_igr.py collect                  # merge + F1 check vs the stored predictions
 
 Outputs per results root (results/<root>/igr/):
-  runs/<Dataset>_<PROTOCOL>/<run>.csv      one row per detector (a rerun skips finished runs)
+  runs/<Dataset>_<PROTOCOL>/<run>.csv      one row per detector; our models twice, variant 'original'
+                                           (p > 0.5) and 'prior' (p > 1 - beta_train, beta_train = the
+                                           design's default share) (a rerun skips finished runs)
   runs/<Dataset>_<PROTOCOL>/<run>.wsp.csv  WSP Stage-1 / edited models (wsp step)
   cache/<Dataset>_<PROTOCOL>/<run>.npz     reports (as bits) + our features of the cached cells
   v3_norm_<PROTOCOL>.json, design_<PROTOCOL>.json
@@ -183,10 +185,10 @@ def original_models(root, dataset, protocol):
             ('ours_cross', os.path.join(res_dir(root), 'cross', f'{protocol}_{D}_test', 'model.pt'))]
 
 
-def _row(run, detector, m, seconds, variant='', model_seed='', budget=''):
+def _row(run, detector, m, seconds, variant='', model_seed='', budget='', prior_beta=''):
     row = {k: run.get(k) for k in igr.ROW_KEYS}
     row.update(m, detector=detector, variant=variant, model_seed=model_seed, budget=budget,
-               seconds=round(seconds, 2))
+               prior_beta=prior_beta, seconds=round(seconds, 2))
     return row
 
 
@@ -200,12 +202,13 @@ BASELINE_METHODS = ('fiad', 'diffstats')
 
 
 def _finished(out_csv, methods):
-    """The run's CSV exists and has a row for every baseline asked for. A run finished without
-    some baseline is simulated again when that baseline is wanted later, so all of its rows
-    stay on the same users."""
+    """The run's CSV exists, has a row for every baseline asked for and has our models at both
+    cut-offs. A run missing any of them is simulated again, so all of its rows stay on the same users."""
     if not os.path.exists(out_csv):
         return False
-    return set(methods) <= set(pd.read_csv(out_csv, usecols=['detector']).detector)
+    df = pd.read_csv(out_csv, usecols=['detector', 'variant'], keep_default_na=False)
+    ours = df[df.detector.str.startswith('ours')]
+    return set(methods) <= set(df.detector) and (ours.empty or 'prior' in set(ours.variant))
 
 
 def process_run(run, args, models, cache_cells):
@@ -245,13 +248,16 @@ def process_run(run, args, models, cache_cells):
     rows = [_row(run, 'no_defense', rd.metrics(None), 0.0),
             _row(run, 'oracle', rd.metrics(rd.labels == 1), 0.0)]
     Xm = igr.model_input(feats, norm)
+    beta_train = float(design['defaults']['attacker_ratio'])       # known at training, not from this run
+    cut = igr.prior_cutoff(beta_train)
     for det, path in original_models(root, dataset, protocol):
         if not os.path.exists(path):
             say(f'    [WARN] {path} missing; {det} skipped')
             continue
         t1 = time.time()
-        rows.append(_row(run, det, rd.metrics(igr.ft_flags(models.get(path), Xm, models.device)),
-                         time.time() - t1, variant='original'))
+        logit = igr.ft_logits(models.get(path), Xm, models.device)
+        rows.append(_row(run, det, rd.metrics(logit > 0), time.time() - t1, variant='original'))
+        rows.append(_row(run, det, rd.metrics(logit > cut), 0.0, variant='prior', prior_beta=beta_train))
     for method in methods:
         t1 = time.time()
         flagged = np.zeros(n, dtype=bool)
@@ -292,7 +298,8 @@ def cmd_run(args):
             say(f'{desc}  (done)')
             continue
         rows, t_sim, t_feat = res
-        parts = '  '.join(f"{r['detector']}: F1={r['f1']:.3f} IGR={r['igr']:+.3f}" for r in rows)
+        parts = '  '.join(f"{r['detector']}{'/prior' if r['variant'] == 'prior' else ''}: "
+                          f"F1={r['f1']:.3f} IGR={r['igr']:+.3f}" for r in rows)
         say(f'{desc}  sim {t_sim:.0f}s feats {t_feat:.0f}s total {time.time() - t0:.0f}s\n    {parts}')
     say(f'shard {args.shard} finished; {failed} failed')
     return 1 if failed else 0

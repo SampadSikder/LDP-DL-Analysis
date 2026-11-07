@@ -18,7 +18,10 @@ below their true frequency, i.e. too many genuine supporters of the targets were
 
 The paper post-processes the attacked estimate. Here the defence is removal: drop the users
 a detector flags, then re-estimate from the rest. These are scored on the same simulated users:
-  ours_in_dist / ours_cross  the v3 FT-Transformer of results/<root>/{in_dist,cross}/
+  ours_in_dist / ours_cross  the v3 FT-Transformer of results/<root>/{in_dist,cross}/, at two cut-offs:
+                             variant 'original' = p > 0.5 (main.py's rule, a 50/50 prior, as trained);
+                             variant 'prior' = p > 1 - beta_train, beta_train = the design's default
+                             attacker share (known when training, not read from the scored run)
   fiad, diffstats            the MDPA_LDP detectors (attacker_detector/FIAD.py, DiffStats.py)
   no_defense                 every report kept
   oracle                     exactly the fake users removed (the floor: LDP noise only)
@@ -43,7 +46,7 @@ import numpy as np
 DETECTOR_ORDER = ['no_defense', 'ours_in_dist', 'ours_cross', 'fiad', 'diffstats', 'oracle']
 ROW_KEYS = ['root', 'dataset_type', 'protocol', 'epsilon', 'attacker_ratio', 'target_set_size',
             'splits', 'replicate', 'n', 'seed']
-ROW_COLS = ROW_KEYS + ['detector', 'variant', 'model_seed', 'budget', 'flagged', 'kept',
+ROW_COLS = ROW_KEYS + ['detector', 'variant', 'model_seed', 'budget', 'prior_beta', 'flagged', 'kept',
                        'TP', 'FP', 'FN', 'TN', 'precision', 'recall', 'f1',
                        'target_true', 'target_est', 'gain', 'igr', 'mse', 'mse_target', 'seconds']
 
@@ -283,15 +286,29 @@ def model_input(feats, norm):
     return ((feats - mu) / sd).astype(np.float32)
 
 
-def ft_flags(model, X, device, batch=32_768):
-    """Users the FT-Transformer flags: sigmoid(logit) > 0.5, main.py's rule."""
+def ft_logits(model, X, device, batch=32_768):
+    """The FT-Transformer's logit for every user."""
     import torch
-    out = np.empty(len(X), dtype=bool)
+    out = np.empty(len(X), dtype=np.float32)
     with torch.no_grad():
         for a in range(0, len(X), batch):
-            logit = model(torch.from_numpy(X[a:a + batch]).to(device)).reshape(-1)
-            out[a:a + batch] = (logit > 0).cpu().numpy()
+            out[a:a + batch] = model(torch.from_numpy(X[a:a + batch]).to(device)).reshape(-1).cpu().numpy()
     return out
+
+
+def ft_flags(model, X, device, batch=32_768):
+    """Users the FT-Transformer flags: sigmoid(logit) > 0.5, main.py's rule."""
+    return ft_logits(model, X, device, batch) > 0
+
+
+def prior_cutoff(beta):
+    """Logit cut-off for a model trained on 50/50 batches, moved to an attacker share beta:
+    flag when p > 1 - beta, i.e. logit > log((1 - beta) / beta). beta is fixed at training time
+    (the design's default share), never read from the run being scored."""
+    beta = float(beta)
+    if not 0.0 < beta < 1.0:
+        raise ValueError(f'attacker share must be in (0, 1), got {beta}')
+    return math.log((1.0 - beta) / beta)
 
 
 # FT-Transformer arguments of the original runs (scripts/run_extra_eps.sh FT array, --feature-set v3)

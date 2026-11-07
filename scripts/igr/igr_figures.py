@@ -11,6 +11,9 @@ so they can be copied from the server and drawn locally):
 
     python scripts/igr/igr_figures.py [--roots oat_b015_mga-a_n500k_v3f ...]
 
+Our models appear twice: at main.py's p > 0.5 (blue) and at p > 1 - beta_train (violet), where
+beta_train is the design's default attacker share (the share known when training).
+
 Reading IGR: 1/r = the baseline attack's level (fake users who just report a target honestly);
 0 = the attack's gain on the targets is gone; below 0 = genuine supporters of the targets were removed
 too. The y axis is symlog (linear inside +-1/r) because an undefended attack reaches IGR >> 1 at small
@@ -43,6 +46,10 @@ BLUE, ORANGE, AQUA, VIOLET = '#2a78d6', '#eb6834', '#1baf7a', '#4a3aa7'
 SERIES = {
     'ours_in_dist': dict(label='Ours (in-distribution)', color=BLUE, ls='-', marker='o', lw=2.0, ms=5, fill='full'),
     'ours_cross':   dict(label='Ours (cross-dataset)', color=BLUE, ls='--', marker='o', lw=1.6, ms=5, fill='none'),
+    'ours_in_dist_prior': dict(label='Ours (in-distribution), cut-off 1−β_train', color=VIOLET, ls='-', marker='D',
+                               lw=2.0, ms=4.5, fill='full'),
+    'ours_cross_prior':   dict(label='Ours (cross-dataset), cut-off 1−β_train', color=VIOLET, ls='--', marker='D',
+                               lw=1.6, ms=4.5, fill='none'),
     'fiad':         dict(label='FIAD', color=ORANGE, ls='--', marker='^', lw=1.4, ms=5, fill='none'),
     'diffstats':    dict(label='Diffstats', color=AQUA, ls=':', marker='s', lw=1.4, ms=4.5, fill='none'),
     'no_defense':   dict(label='No defence', color=MUTED, ls='-', marker='x', lw=1.2, ms=4.5, fill='full'),
@@ -82,6 +89,10 @@ def load(root):
     for c in ('splits', 'target_set_size'):
         df[c] = pd.to_numeric(df[c], errors='coerce').astype(int)
     df['variant'] = df['variant'].fillna('').astype(str)
+    # our models at the training-share cut-off become series of their own
+    prior = df.variant == 'prior'
+    df.loc[prior, 'detector'] = df.loc[prior, 'detector'] + '_prior'
+    df.loc[prior, 'variant'] = 'original'
     designs = {}
     for f in glob.glob(os.path.join(RESULTS, root, 'igr', 'design_*.json')):
         with open(f) as fh:
@@ -238,7 +249,7 @@ def default_figure(root, t):
     hs = [Line2D([], [], linestyle='none', marker=SERIES[k]['marker'] or 'd', color=SERIES[k]['color'],
                  markersize=max(SERIES[k]['ms'], 5), fillstyle=SERIES[k]['fill'], markeredgewidth=1.2,
                  label=SERIES[k]['label']) for k in keys]
-    fig.legend(handles=hs, loc='lower center', ncol=3, fontsize=8.5)
+    fig.legend(handles=hs, loc='lower center', ncol=4, fontsize=8.5)
     H = fig.get_figheight()
     fig.tight_layout(rect=(0, 0.55 / H, 1, 1 - 0.35 / H))
     path = os.path.join(OUT, f'igr_{root}_default.png')
