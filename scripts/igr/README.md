@@ -48,6 +48,12 @@ tail -f results/igr_logs/run_igr_server.log
 grep -c "sim " results/igr_logs/run_shard*.log                     # finished runs per shard
 ```
 
+Our models are scored at two cut-offs on the same users. Variant `original` is `p > 0.5`, main.py's
+rule; models trained on 50/50 batches treat half of all users as attackers. Variant `prior` is
+`p > 1 − β_train`, where `β_train` is the design's default attacker share, the share known when training:
+0.05 for the main MGA-A and APA sweeps and higheps, 0.10 for b010 and 0.15 for b015. It is never read
+from the run being scored. In the figures, `prior` is the violet series.
+
 Without FIAD (it takes most of the run time), keeping Diffstats:
 
 ```bash

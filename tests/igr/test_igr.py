@@ -104,6 +104,14 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual((bad['TP'], bad['FP'], bad['FN']), (0, 2, 2))
         self.assertTrue(np.isnan(rd.metrics(np.ones(6, bool))['igr']))
 
+    def test_prior_cutoff(self):
+        sig = lambda x: 1.0 / (1.0 + np.exp(-x))            # noqa: E731
+        self.assertAlmostEqual(igr.prior_cutoff(0.5), 0.0)  # a 50/50 share is main.py's p > 0.5
+        for beta in (0.01, 0.05, 0.1, 0.15):
+            self.assertAlmostEqual(sig(igr.prior_cutoff(beta)), 1.0 - beta)
+        with self.assertRaises(ValueError):
+            igr.prior_cutoff(0.0)
+
     def test_cache_roundtrip(self):
         rd = self._toy()
         rd.feats = np.arange(24, dtype=np.float64).reshape(6, 4)
@@ -190,10 +198,14 @@ class TestCLI(unittest.TestCase):
         out = self.cli('run', '--cache', 'all', '--baselines', 'diffstats')        # FIAD skipped
         self.assertIn('ours_cross', out)
         self.assertNotIn('fiad', out)
-        one = pd.read_csv(os.path.join(igr_dir, 'runs', 'Fire_OUE', 'eps1_b0.1_r10_s4_rep1.csv'))
-        self.assertEqual(sorted(one.detector),
-                         sorted(['no_defense', 'oracle', 'ours_in_dist', 'ours_cross', 'diffstats']))
+        one_csv = os.path.join(igr_dir, 'runs', 'Fire_OUE', 'eps1_b0.1_r10_s4_rep1.csv')
+        one = pd.read_csv(one_csv, keep_default_na=False)
+        self.assertEqual(sorted(one.detector + '/' + one.variant),
+                         sorted(['no_defense/', 'oracle/', 'diffstats/', 'ours_in_dist/original', 'ours_in_dist/prior',
+                                 'ours_cross/original', 'ours_cross/prior']))
         self.assertEqual(self.cli('run', '--cache', 'all', '--baselines', 'diffstats').count('(done)'), 2)
+        one[one.variant != 'prior'].to_csv(one_csv, index=False)          # a run from before the prior cut-off
+        self.assertEqual(self.cli('run', '--cache', 'all', '--baselines', 'diffstats').count('(done)'), 1)
         self.assertEqual(self.cli('run', '--cache', 'all', '--baselines').count('(done)'), 2)  # ours only: done
         out = self.cli('run', '--cache', 'all')            # FIAD wanted now: both runs simulated again
         self.assertEqual(out.count('(done)'), 0)
@@ -207,8 +219,15 @@ class TestCLI(unittest.TestCase):
         df = pd.read_csv(os.path.join(igr_dir, 'igr_runs.csv'))
         self.assertEqual(sorted(df.detector.unique()),
                          sorted(['no_defense', 'oracle', 'ours_in_dist', 'ours_cross', 'fiad', 'diffstats']))
-        self.assertEqual(len(df), 12)
+        self.assertEqual(len(df), 16)                       # 2 runs x (4 detectors + our 2 models at 2 cut-offs)
         self.assertTrue(np.isfinite(df.igr).all())
+        # the prior cut-off: beta_train from the design default (0.1), and never more flags than p > 0.5
+        pr = df[df.variant == 'prior']
+        self.assertEqual(len(pr), 4)
+        self.assertTrue((pr.prior_beta == 0.1).all())
+        orig = df[df.variant == 'original'].set_index(['detector', 'epsilon'])
+        for _, r in pr.iterrows():
+            self.assertLessEqual(r.flagged, orig.loc[(r.detector, r.epsilon), 'flagged'])
         o = df[df.detector == 'oracle']
         self.assertTrue((o.f1 == 1.0).all() and (o.FP == 0).all())
         self.assertTrue((df[df.detector == 'no_defense'].flagged == 0).all())
@@ -229,7 +248,7 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(mod.cmd_wsp(Namespace(processors=1, device='cpu')), 0)
         w = pd.read_csv(os.path.join(igr_dir, 'runs', 'Fire_OUE', 'eps1_b0.1_r10_s4_rep1.wsp.csv'))
         self.assertEqual(list(w.variant), ['stage1', 'wsp'])
-        base = df[(df.detector == 'ours_in_dist') & (df.epsilon == 1.0)].iloc[0]
+        base = df[(df.detector == 'ours_in_dist') & (df.variant == 'original') & (df.epsilon == 1.0)].iloc[0]
         for col in ('igr', 'flagged', 'f1', 'mse'):                                   # same model, same users
             self.assertAlmostEqual(float(w[col].iloc[0]), float(base[col]), places=9)
 
