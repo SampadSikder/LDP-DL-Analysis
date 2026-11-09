@@ -194,8 +194,9 @@ def _row(run, detector, m, seconds, variant='', model_seed='', budget='', prior_
 
 def _write_rows(path, rows):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    pd.DataFrame(rows, columns=igr.ROW_COLS).to_csv(path + '.tmp', index=False)
-    os.replace(path + '.tmp', path)
+    tmp = f'{path}.{os.getpid()}.tmp'                  # per process: two launches never share a temp file
+    pd.DataFrame(rows, columns=igr.ROW_COLS).to_csv(tmp, index=False)
+    os.replace(tmp, path)
 
 
 BASELINE_METHODS = ('fiad', 'diffstats')

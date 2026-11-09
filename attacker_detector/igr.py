@@ -179,7 +179,7 @@ class RunData:
     # ---- cache (lets models trained later, e.g. WSP-edited ones, be scored on the same users)
     def save(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + '.tmp.npz'
+        tmp = f'{path}.{os.getpid()}.tmp.npz'        # per process: two launches never share a temp file
         np.savez(tmp, labels=self.labels, targets=self.targets, f_true=self.f_true,
                  feats=self.feats.astype(np.float32), run=json.dumps(self.run, default=_jsonable),
                  **self.support.save_arrays())
