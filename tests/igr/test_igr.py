@@ -179,13 +179,47 @@ class TestCLI(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def cli(self, *args):
+    def cli(self, *args, root='fake_v3f', ok=True):
         env = dict(os.environ, IGR_RESULTS=self.results, MPLCONFIGDIR=self.tmp, PYTHONDONTWRITEBYTECODE='1')
-        p = subprocess.run([sys.executable, SCRIPT, *args, '--roots', 'fake_v3f', '--data-map', f'fake_v3f={self.data}',
+        p = subprocess.run([sys.executable, SCRIPT, *args, '--roots', root, '--data-map', f'{root}={self.data}',
                             '--protocols', 'OUE', '--processors', '1', '--device', 'cpu'],
                            capture_output=True, text=True, env=env, cwd=ROOT)
-        self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+        if ok:
+            self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
         return p.stdout
+
+    def test_frozen_threshold_model(self):
+        """A reference-beta model dir (threshold.json + scaler.json) is scored once, at its own
+        scaler and frozen threshold; without threshold.json the run fails instead of using 0.5."""
+        import pandas as pd
+        import torch
+        from attacker_detector import reference_beta as rb
+        root = 'fake_bfix'
+        d = os.path.join(self.results, root, 'in_dist', 'Fire_OUE')
+        os.makedirs(d)
+        torch.manual_seed(5)
+        torch.save({'model_state_dict': igr.build_ft(4, igr_script().ft_spec()).state_dict()},
+                   os.path.join(d, 'model.pt'))
+        with open(os.path.join(d, 'scaler.json'), 'w') as f:
+            json.dump({'mean': [0.0] * 4, 'std': [1.0] * 4}, f)
+        with open(os.path.join(d, 'variant.json'), 'w') as f:
+            json.dump({'variant': rb.VARIANT}, f)
+        rb.save_threshold(d, {'threshold': 0.25, 'score_scale': rb.SCORE_SCALE,
+                              'decision_operator': rb.DECISION_OPERATOR,
+                              'model': {'checkpoint_sha256': rb.file_sha256(os.path.join(d, 'model.pt'))}})
+        os.rename(os.path.join(d, 'threshold.json'), os.path.join(d, 'threshold.json.bak'))
+        out = self.cli('run', '--baselines', root=root, ok=False)
+        self.assertIn('FAILED', out)                                       # no silent 0.5 fallback
+        self.assertIn('threshold.json is missing', out)
+        os.rename(os.path.join(d, 'threshold.json.bak'), os.path.join(d, 'threshold.json'))
+        self.cli('run', '--baselines', root=root)
+        f = os.path.join(self.results, root, 'igr', 'runs', 'Fire_OUE', 'eps1_b0.1_r10_s4_rep1.csv')
+        r = pd.read_csv(f, keep_default_na=False)
+        ours = r[r.detector == 'ours_in_dist']
+        self.assertEqual(list(ours.variant), ['frozen'])
+        self.assertEqual(float(ours.threshold.iloc[0]), 0.25)
+        self.assertNotIn('v3_norm_OUE.json', os.listdir(os.path.join(self.results, root, 'igr')))
+        self.assertIn('(done)', self.cli('run', '--baselines', root=root))  # resumable
 
     def test_pipeline(self):
         import pandas as pd

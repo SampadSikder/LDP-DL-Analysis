@@ -37,6 +37,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from attacker_detector import igr  # noqa: E402
+from attacker_detector import reference_beta as refbeta  # noqa: E402
 
 V3F_ROOTS = ['oat_b015_mga-a_n500k_v3f', 'oat_v3_n500k_v3f', 'oat_b010_mga-a_n500k_v3f',
              'oat_higheps_mga-a_n500k_v3f', 'oat_apa_n500k_v3f']
@@ -56,8 +57,18 @@ def igr_dir(root):
     return os.path.join(res_dir(root), 'igr')
 
 
+BFIX_SUFFIX = '_bfix'          # results roots of the reference-beta variant (scripts/run_beta_fixed.sh)
+
+
+def data_root_name(root):
+    for suffix in ('_v3f', BFIX_SUFFIX):
+        if root.endswith(suffix):
+            return root[:-len(suffix)]
+    return root
+
+
 def data_dir(root, protocol, data_map):
-    base = data_map.get(root) or os.path.join('output', root[:-len('_v3f')] if root.endswith('_v3f') else root)
+    base = data_map.get(root) or os.path.join('output', data_root_name(root))
     return os.path.join(base if os.path.isabs(base) else os.path.join(ROOT, base), protocol)
 
 
@@ -185,11 +196,23 @@ def original_models(root, dataset, protocol):
             ('ours_cross', os.path.join(res_dir(root), 'cross', f'{protocol}_{D}_test', 'model.pt'))]
 
 
-def _row(run, detector, m, seconds, variant='', model_seed='', budget='', prior_beta=''):
+def _row(run, detector, m, seconds, variant='', model_seed='', budget='', prior_beta='', threshold='',
+         model_sha=''):
     row = {k: run.get(k) for k in igr.ROW_KEYS}
     row.update(m, detector=detector, variant=variant, model_seed=model_seed, budget=budget,
-               prior_beta=prior_beta, seconds=round(seconds, 2))
+               prior_beta=prior_beta, threshold=threshold, model_sha=model_sha, seconds=round(seconds, 2))
     return row
+
+
+def _frozen(model_path):
+    """(scaler, threshold record) of a reference-beta model; fails without them (no 0.5 fallback),
+    and checks the checkpoint is the one the threshold was selected for."""
+    mdir = os.path.dirname(model_path)
+    rec = refbeta.load_threshold(mdir)
+    sha = refbeta.file_sha256(model_path)
+    if sha != rec['model']['checkpoint_sha256']:
+        raise RuntimeError(f'{model_path} is not the checkpoint its threshold.json was selected for')
+    return refbeta.load_scaler(mdir), rec
 
 
 def _write_rows(path, rows):
@@ -208,8 +231,8 @@ def _finished(out_csv, methods):
     if not os.path.exists(out_csv):
         return False
     df = pd.read_csv(out_csv, usecols=['detector', 'variant'], keep_default_na=False)
-    ours = df[df.detector.str.startswith('ours')]
-    return set(methods) <= set(df.detector) and (ours.empty or 'prior' in set(ours.variant))
+    ours = set(df.loc[df.detector.str.startswith('ours'), 'variant'])
+    return set(methods) <= set(df.detector) and (not ours or 'prior' in ours or 'frozen' in ours)
 
 
 def process_run(run, args, models, cache_cells):
@@ -226,7 +249,10 @@ def process_run(run, args, models, cache_cells):
         return None
 
     design = design_for(root, protocol, run['data_dir'])
-    norm = norm_for(root, protocol, run['data_dir'])
+    model_list = [(det, path) for det, path in original_models(root, dataset, protocol) if os.path.exists(path)]
+    frozen_models = {path: _frozen(path) for _, path in model_list if refbeta.is_variant_dir(os.path.dirname(path))}
+    # the training dir's global z-score is only needed for the standard models
+    norm = None if len(frozen_models) == len(model_list) else norm_for(root, protocol, run['data_dir'])
     t0 = time.time()
     X, targets, support, labels, estimate, one_list = igr.simulate(run, args.processors)
     n, d, eps = len(labels), int(run['domain']), float(run['epsilon'])
@@ -248,7 +274,7 @@ def process_run(run, args, models, cache_cells):
 
     rows = [_row(run, 'no_defense', rd.metrics(None), 0.0),
             _row(run, 'oracle', rd.metrics(rd.labels == 1), 0.0)]
-    Xm = igr.model_input(feats, norm)
+    Xm = igr.model_input(feats, norm) if norm is not None else None
     beta_train = float(design['defaults']['attacker_ratio'])       # known at training, not from this run
     cut = igr.prior_cutoff(beta_train)
     for det, path in original_models(root, dataset, protocol):
@@ -256,6 +282,14 @@ def process_run(run, args, models, cache_cells):
             say(f'    [WARN] {path} missing; {det} skipped')
             continue
         t1 = time.time()
+        if path in frozen_models:
+            # reference-beta model: its own optimization-row scaler and its frozen threshold, nothing else
+            scaler, rec = frozen_models[path]
+            logit = igr.ft_logits(models.get(path), igr.model_input(feats, scaler), models.device)
+            rows.append(_row(run, det, rd.metrics(refbeta.decide(logit, rec['threshold'])), time.time() - t1,
+                             variant='frozen', threshold=rec['threshold'],
+                             model_sha=rec['model']['checkpoint_sha256'][:16]))
+            continue
         logit = igr.ft_logits(models.get(path), Xm, models.device)
         rows.append(_row(run, det, rd.metrics(logit > 0), time.time() - t1, variant='original'))
         rows.append(_row(run, det, rd.metrics(logit > cut), 0.0, variant='prior', prior_beta=beta_train))
@@ -371,7 +405,8 @@ def _stored_f1(model_dir):
     if not os.path.exists(p):
         return None
     with np.load(p) as z:
-        y, pred = z['label'].astype(bool), z['prob'] > 0.5
+        y = z['label'].astype(bool)
+        pred = refbeta.decide(z['logit'], float(z['threshold'])) if 'threshold' in z.files else z['prob'] > 0.5
         df = pd.DataFrame({'epsilon': z['epsilon'].astype(float).round(6),
                            'attacker_ratio': z['attacker_ratio'].astype(float).round(6),
                            'splits': z['splits'].astype(int),
@@ -388,7 +423,7 @@ def cmd_collect(args):
             continue
         df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
         df.to_csv(os.path.join(igr_dir(root), 'igr_runs.csv'), index=False)
-        orig = df[df.detector.str.startswith('ours') & (df.variant == 'original')].copy()
+        orig = df[df.detector.str.startswith('ours') & df.variant.isin(['original', 'frozen'])].copy()
         checks = []
         for (det, ds, proto), g in orig.groupby(['detector', 'dataset_type', 'protocol']):
             D = ds.capitalize()

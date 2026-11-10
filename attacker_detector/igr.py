@@ -21,7 +21,10 @@ a detector flags, then re-estimate from the rest. These are scored on the same s
   ours_in_dist / ours_cross  the v3 FT-Transformer of results/<root>/{in_dist,cross}/, at two cut-offs:
                              variant 'original' = p > 0.5 (main.py's rule, a 50/50 prior, as trained);
                              variant 'prior' = p > 1 - beta_train, beta_train = the design's default
-                             attacker share (known when training, not read from the scored run)
+                             attacker share (known when training, not read from the scored run).
+                             A reference-beta model (attacker_detector/reference_beta.py, a model dir
+                             with threshold.json) is scored once, variant 'frozen': its own scaler and
+                             its validation-selected threshold, logit > threshold
   fiad, diffstats            the MDPA_LDP detectors (attacker_detector/FIAD.py, DiffStats.py)
   no_defense                 every report kept
   oracle                     exactly the fake users removed (the floor: LDP noise only)
@@ -46,7 +49,8 @@ import numpy as np
 DETECTOR_ORDER = ['no_defense', 'ours_in_dist', 'ours_cross', 'fiad', 'diffstats', 'oracle']
 ROW_KEYS = ['root', 'dataset_type', 'protocol', 'epsilon', 'attacker_ratio', 'target_set_size',
             'splits', 'replicate', 'n', 'seed']
-ROW_COLS = ROW_KEYS + ['detector', 'variant', 'model_seed', 'budget', 'prior_beta', 'flagged', 'kept',
+ROW_COLS = ROW_KEYS + ['detector', 'variant', 'model_seed', 'budget', 'prior_beta', 'threshold', 'model_sha',
+                       'flagged', 'kept',
                        'TP', 'FP', 'FN', 'TN', 'precision', 'recall', 'f1',
                        'target_true', 'target_est', 'gain', 'igr', 'mse', 'mse_target', 'seconds']
 

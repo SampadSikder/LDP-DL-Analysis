@@ -5,6 +5,7 @@ Reads results/<root>/igr/igr_runs.csv and design_<PROTOCOL>.json (run_igr.py col
 so they can be copied from the server and drawn locally):
 
   igr_<root>_<PROTOCOL>.png   IGR vs each swept parameter (one-at-a-time slices), one row per dataset
+  f1_<root>_<PROTOCOL>.png    F1 of the same removals vs each swept parameter (same users, same layout)
   igr_<root>_default.png      every protocol / dataset at the design's default point: IGR and MSE
   igr_wsp.png                 WSP runs: Stage 1 vs WSP-edited vs fine-tune / random (when scored)
   tables/igr_<root>_sweeps.csv, tables/igr_<root>_default.csv, tables/igr_wsp.csv
@@ -50,6 +51,10 @@ SERIES = {
                                lw=2.0, ms=4.5, fill='full'),
     'ours_cross_prior':   dict(label='Ours (cross-dataset), cut-off 1−β_train', color=VIOLET, ls='--', marker='D',
                                lw=1.6, ms=4.5, fill='none'),
+    'ours_in_dist_frozen': dict(label='Ours (in-distribution), β=β_src training, validation threshold',
+                                color=ORANGE, ls='-', marker='s', lw=2.0, ms=4.5, fill='full'),
+    'ours_cross_frozen':   dict(label='Ours (cross-dataset), β=β_src training, validation threshold',
+                                color=ORANGE, ls='--', marker='s', lw=1.6, ms=4.5, fill='none'),
     'fiad':         dict(label='FIAD', color=ORANGE, ls='--', marker='^', lw=1.4, ms=5, fill='none'),
     'diffstats':    dict(label='Diffstats', color=AQUA, ls=':', marker='s', lw=1.4, ms=4.5, fill='none'),
     'no_defense':   dict(label='No defence', color=MUTED, ls='-', marker='x', lw=1.2, ms=4.5, fill='full'),
@@ -93,6 +98,10 @@ def load(root):
     prior = df.variant == 'prior'
     df.loc[prior, 'detector'] = df.loc[prior, 'detector'] + '_prior'
     df.loc[prior, 'variant'] = 'original'
+    # a reference-beta model's only rows: its frozen, validation-selected threshold
+    frozen = df.variant == 'frozen'
+    df.loc[frozen, 'detector'] = df.loc[frozen, 'detector'] + '_frozen'
+    df.loc[frozen, 'variant'] = 'original'
     designs = {}
     for f in glob.glob(os.path.join(RESULTS, root, 'igr', 'design_*.json')):
         with open(f) as fh:
@@ -115,9 +124,9 @@ def oat_slice(df, design, param):
     return df[m]
 
 
-def plot_series(ax, g, x, st, label=None):
-    g = g.groupby(x, as_index=False)['igr'].mean().sort_values(x)
-    ax.plot(g[x], g['igr'], color=st['color'], linestyle=st['ls'], marker=st['marker'], linewidth=st['lw'],
+def plot_series(ax, g, x, st, label=None, y='igr'):
+    g = g.groupby(x, as_index=False)[y].mean().sort_values(x)
+    ax.plot(g[x], g[y], color=st['color'], linestyle=st['ls'], marker=st['marker'], linewidth=st['lw'],
             markersize=st['ms'], fillstyle=st['fill'], markeredgewidth=1.1, label=label or st['label'], zorder=3)
 
 
@@ -140,23 +149,33 @@ def symlog_axis(ax, r):
     ax.axhline(1.0 / r, color=INK2, linewidth=0.8, linestyle=(0, (4, 3)), zorder=1)
 
 
-def legend_handles(series, keys):
+def legend_handles(series, keys, baseline=True):
     out = []
     for k in keys:
         st = series[k]
         out.append(Line2D([], [], color=st['color'], linestyle=st['ls'], marker=st['marker'], linewidth=st['lw'],
                           markersize=st['ms'], fillstyle=st['fill'], markeredgewidth=1.1, label=st['label']))
-    out.append(Line2D([], [], color=INK2, linewidth=0.8, linestyle=(0, (4, 3)), label='Baseline attack (1/r)'))
+    if baseline:
+        out.append(Line2D([], [], color=INK2, linewidth=0.8, linestyle=(0, (4, 3)), label='Baseline attack (1/r)'))
     return out
 
 
-def protocol_figure(root, protocol, df, design):
+# F1 of no defence (0) and perfect removal (1) is fixed, so the F1 figures leave them out
+F1_SKIP = {'no_defense', 'oracle'}
+
+
+def protocol_figure(root, protocol, df, design, metric='igr'):
+    """One-at-a-time sweeps of `metric` ('igr' or 'f1') for one protocol: rows = datasets,
+    columns = swept parameters."""
     params = swept(design)
     if not params:
         return None
     d = df[(df.protocol == protocol) & (df.variant.isin(['', 'original']))]
+    if metric == 'f1':
+        d = d[~d.detector.isin(F1_SKIP)]
     if d.empty:
         return None
+    ylab = 'IGR' if metric == 'igr' else 'F1'
     one = len(params) == 1
     datasets = [x for x in DATASETS if x in set(d.dataset_type)]
     nr, nc = (1, len(datasets)) if one else (len(datasets), len(params))
@@ -169,30 +188,36 @@ def protocol_figure(root, protocol, df, design):
             s = oat_slice(d[d.dataset_type == ds], design, p)
             for k in keys:
                 if len(s[s.detector == k]):
-                    plot_series(ax, s[s.detector == k], p, SERIES[k])
-            symlog_axis(ax, r)
+                    plot_series(ax, s[s.detector == k], p, SERIES[k], y=metric)
+            if metric == 'igr':
+                symlog_axis(ax, r)
+            else:
+                ax.set_ylim(-0.03, 1.03)
             if p == 'attacker_ratio':
                 ax.set_xscale('log')
             ax.set_title(ds if one or j == 0 else '', loc='left', fontsize=9.5, color=INK)
             if one or i == len(datasets) - 1:
                 ax.set_xlabel(PARAM_LABEL[p])
             if (one and i == 0) or (not one and j == 0):
-                ax.set_ylabel('IGR' if one else f'{ds}\nIGR')
+                ax.set_ylabel(ylab if one else f'{ds}\n{ylab}')
     if not one:
         for j, p in enumerate(params):
             axes[0, j].set_title(f'{datasets[0]}, vs {PARAM_LABEL[p]}', loc='left', fontsize=9.5)
-    symlog_ticks(axes[0, 0].yaxis, axes[0, 0].get_ylim(), r)
+    if metric == 'igr':
+        symlog_ticks(axes[0, 0].yaxis, axes[0, 0].get_ylim(), r)
     dflt = design.get('defaults', {})
-    fig.suptitle(f'{PROTOCOL_LABEL[protocol]}: item gain ratio after removing the flagged users',
+    title = ('item gain ratio after removing the flagged users' if metric == 'igr'
+             else 'F1 of the flagged users on the IGR runs (natural attacker share)')
+    fig.suptitle(f'{PROTOCOL_LABEL[protocol]}: {title}',
                  x=0.01, y=0.995, ha='left', va='top', fontsize=10.5, color=INK)
     fig.text(0.01, 0.995 - 0.3 / fig.get_figheight(),
              f'{root} · other parameters at ε={dflt.get("epsilon")}, β={dflt.get("attacker_ratio")}, r={r}, '
              f'r\'={dflt.get("splits")}', ha='left', va='top', fontsize=8.5, color=INK2)
-    fig.legend(handles=legend_handles(SERIES, keys), loc='lower center', ncol=4, fontsize=8.5,
-               bbox_to_anchor=(0.5, 0.0))
+    fig.legend(handles=legend_handles(SERIES, keys, baseline=metric == 'igr'), loc='lower center', ncol=4,
+               fontsize=8.5, bbox_to_anchor=(0.5, 0.0))
     H = fig.get_figheight()
     fig.tight_layout(rect=(0, 0.55 / H, 1, 1 - 0.55 / H))
-    path = os.path.join(OUT, f'igr_{root}_{protocol}.png')
+    path = os.path.join(OUT, f'{metric}_{root}_{protocol}.png')
     fig.savefig(path, dpi=160)
     plt.close(fig)
     return path
@@ -302,7 +327,11 @@ def wsp_figure(df, root):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--roots', nargs='+')
+    ap.add_argument('--out', help='figure folder (default results/figures/frequency_oracle/igr)')
     args = ap.parse_args()
+    if args.out:
+        global OUT
+        OUT = args.out
     roots = args.roots or sorted(os.path.basename(os.path.dirname(os.path.dirname(p)))
                                  for p in glob.glob(os.path.join(RESULTS, '*', 'igr', 'igr_runs.csv')))
     if not roots:
@@ -318,6 +347,7 @@ def main():
         for protocol in PROTOCOLS:
             if protocol in designs:
                 made.append(protocol_figure(root, protocol, df, designs[protocol]))
+                made.append(protocol_figure(root, protocol, df, designs[protocol], metric='f1'))
         t = default_table(df, designs)
         if not t.empty:
             t.to_csv(os.path.join(OUT, 'tables', f'igr_{root}_default.csv'), index=False)

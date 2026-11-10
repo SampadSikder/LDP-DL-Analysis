@@ -42,9 +42,13 @@ def run_sensitivity_analysis(
     config_array: Optional[np.ndarray] = None,
     batch_size: int = 4096,
     oat_defaults: Optional[dict] = None,
+    logit_threshold: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Evaluate model performance across parameter values.
+
+    logit_threshold: None = flag when p > 0.5. A number = flag when the logit is
+    above it (a frozen, validation-selected threshold).
 
     Args:
         model:        Trained model.
@@ -69,12 +73,18 @@ def run_sensitivity_analysis(
     for i in range(0, len(X_test), batch_size):
         batch = torch.FloatTensor(X_test[i:i + batch_size]).to(device)
         with torch.no_grad():
-            out = torch.sigmoid(model(batch))
+            out = model(batch)
+            if logit_threshold is None:
+                out = torch.sigmoid(out)
             all_probs.append(out.cpu().numpy().flatten())
         del batch
 
     global_probs = np.concatenate(all_probs)
-    global_preds = (global_probs > 0.5).astype(int)
+    if logit_threshold is None:
+        global_preds = (global_probs > 0.5).astype(int)
+    else:
+        from attacker_detector.reference_beta import decide
+        global_preds = decide(global_probs, logit_threshold).astype(int)
     y_true_all   = y_test.astype(int)
 
     def _row(param_type, label, value, mask, slice_name):

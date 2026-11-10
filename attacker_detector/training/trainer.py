@@ -335,7 +335,8 @@ class Trainer:
         X: np.ndarray,
         y: np.ndarray,
         batch_size: int = 4096,
-        label: str = "Test"
+        label: str = "Test",
+        logit_threshold: Optional[float] = None,
     ) -> Dict[str, float]:
         """
         Evaluate the model and return aggregate metrics.
@@ -345,6 +346,8 @@ class Trainer:
             y: Ground-truth labels.
             batch_size: Batch size for inference.
             label: Label for print output (e.g. 'Test', 'Eval'). None = silent.
+            logit_threshold: None = flag when p > 0.5. A number = flag when the
+                logit is above it (a frozen, validation-selected threshold).
 
         Returns:
             Dict with Accuracy, Precision, Recall, F1_Score.
@@ -355,12 +358,18 @@ class Trainer:
         for i in range(0, len(X), batch_size):
             batch = torch.FloatTensor(X[i:i + batch_size]).to(self.device)
             with torch.no_grad():
-                probs = torch.sigmoid(self.model(batch))
-                all_probs.append(probs.cpu().numpy().flatten())
+                out = self.model(batch)
+                if logit_threshold is None:
+                    out = torch.sigmoid(out)
+                all_probs.append(out.cpu().numpy().flatten())
             del batch
 
         probs = np.concatenate(all_probs)
-        preds = (probs > 0.5).astype(int)
+        if logit_threshold is None:
+            preds = (probs > 0.5).astype(int)
+        else:
+            from attacker_detector.reference_beta import decide
+            preds = decide(probs, logit_threshold).astype(int)
 
         metrics = {
             'Accuracy': accuracy_score(y, preds),

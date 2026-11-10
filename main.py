@@ -342,6 +342,32 @@ def parse_args():
              'threshold choices can be evaluated later without retraining'
     )
 
+    ref = parser.add_argument_group(
+        'reference-beta variant',
+        'Train and validate only on runs generated at one attacker share, and '
+        'evaluate at a threshold selected on validation data '
+        '(attacker_detector/reference_beta.py). The held-out test runs, at every '
+        'share of the sweep, are unchanged.'
+    )
+    ref.add_argument(
+        '--source-beta', type=float, default=None,
+        help='Attacker share of the complete runs used for optimization and '
+             'validation (source_beta). The sampled training rows stay 50/50. '
+             'Setting it selects this variant; needs --val-data, --feature-set v3, '
+             '--k-folds 0 and --output-dir'
+    )
+    ref.add_argument(
+        '--val-data', type=str, default=None,
+        help='Dataset directory of validation source runs at --source-beta '
+             '(generate_dataset.py --role validation --replicate-offset ...): other '
+             'runs than the ones optimization rows come from'
+    )
+    ref.add_argument(
+        '--threshold-reference-beta', type=float, default=None,
+        help='Attacker share the threshold-selection F1 stands for '
+             '(default: --source-beta)'
+    )
+
     baselines = parser.add_argument_group(
         'baselines',
         'Score FIAD / Diffstats (MDPA_LDP) instead of training a model. The runs '
@@ -373,6 +399,14 @@ def parse_args():
             parser.error("--baseline-runs must be a positive integer")
     elif args.model is None:
         parser.error("--model is required unless --baseline is given")
+
+    if args.source_beta is not None and not args.baseline:
+        from attacker_detector import reference_beta
+        if args.threshold_reference_beta is None:
+            args.threshold_reference_beta = args.source_beta
+        reference_beta.check_args(args, parser.error)
+    elif args.val_data or args.threshold_reference_beta is not None:
+        parser.error("--val-data / --threshold-reference-beta need --source-beta")
 
     if args.dataset and args.training_method != 'none':
         parser.error("--dataset only applies to --training-method none")
@@ -409,6 +443,11 @@ def main():
     if args.baseline:
         from attacker_detector.baselines import run_baselines
         run_baselines(args)
+        return
+
+    if args.source_beta is not None:
+        from attacker_detector import reference_beta
+        reference_beta.run(args)
         return
 
     torch.manual_seed(args.seed)

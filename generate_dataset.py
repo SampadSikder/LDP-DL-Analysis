@@ -152,13 +152,16 @@ def build_tasks(args) -> list:
                 for epsilon, ratio, target_size, splits in points:
                     n_train = oat_replicates(args, ratio, n)
                     for exp_i in range(n_train + args.holdout_replicates):
+                        # replicate index = offset + exp_i: a supplementary dataset
+                        # (--replicate-offset) never repeats a seed of the base one
+                        rep = args.replicate_offset + exp_i
                         tasks.append(_make_task(
                             args,
                             epsilon=epsilon, dataset_type=dataset_type,
                             domain=domain, n=n, protocol=protocol, ratio=ratio,
-                            target_size=target_size, splits=splits, exp_i=exp_i,
+                            target_size=target_size, splits=splits, exp_i=rep,
                             seed=_oat_seed(args.seed, dataset_type, protocol,
-                                           epsilon, ratio, target_size, splits, exp_i),
+                                           epsilon, ratio, target_size, splits, rep),
                             holdout=int(exp_i >= n_train),
                         ))
         return tasks
@@ -291,6 +294,9 @@ def write_design(args, tasks: list, output_dir: str) -> None:
         }
         design['balance_attackers'] = args.balance_attackers
         design['holdout_replicates'] = args.holdout_replicates
+        design['replicate_offset'] = args.replicate_offset
+    design['role'] = args.role
+    design['seed'] = args.seed
 
     with open(os.path.join(output_dir, 'design.json'), 'w') as f:
         json.dump(design, f, indent=2)
@@ -568,9 +574,26 @@ def parse_args():
              'main.py never trains on them'
     )
 
+    oat.add_argument(
+        '--replicate-offset', type=int, default=0,
+        help='First replicate index of every config (seeds are derived from it). '
+             'A supplementary dataset of extra runs for the same configs -- e.g. the '
+             'validation runs of main.py --source-beta -- uses an offset beyond the '
+             'base dataset\'s replicates, so no run is generated twice'
+    )
+    parser.add_argument(
+        '--role', type=str, default='dataset',
+        help="Recorded in design.json. 'validation' marks a directory of validation "
+             "source runs (main.py --val-data)"
+    )
+
     args = parser.parse_args()
-    if args.design == 'grid' and (args.balance_attackers or args.holdout_replicates):
-        parser.error('--balance-attackers / --holdout-replicates require --design oat')
+    if args.design == 'grid' and (args.balance_attackers or args.holdout_replicates
+                                  or args.replicate_offset):
+        parser.error('--balance-attackers / --holdout-replicates / --replicate-offset '
+                     'require --design oat')
+    if args.replicate_offset < 0:
+        parser.error('--replicate-offset must be >= 0')
     if args.balance_attackers is not None and args.balance_attackers < 1:
         parser.error('--balance-attackers must be a positive integer')
     if args.holdout_replicates < 0:

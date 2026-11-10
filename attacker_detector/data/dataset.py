@@ -192,7 +192,7 @@ FEATURE_NAMES_V3 = ['block_projection', 'block_overlap', 'one_deviation', 'exces
 _V3_PER_RUN = ('block_projection', 'block_overlap', 'one_deviation')
 
 
-def apply_feature_set_v3(ds: NpyDataset) -> None:
+def apply_feature_set_v3(ds: NpyDataset, normalize: bool = True) -> None:
     """Replace ds.features with the cross-dataset feature set v3, in place.
 
     Built from a v2 dataset's stored columns, so nothing is regenerated:
@@ -205,7 +205,10 @@ def apply_feature_set_v3(ds: NpyDataset) -> None:
           share of the run's users reporting exactly the user's count k minus the
           binomial share predicted for k. MGA-A fakes sit at ~beta on every
           dataset; the domain-scaled k-features and freq_ratio do not transfer
-    A final global z-score only sets the scale the network sees.
+    A final global z-score only sets the scale the network sees. With
+    normalize=False that last step is left to the caller (main.py --source-beta
+    fits it on the optimization rows only): ds.features then holds the per-run
+    values as float64 and ds.norm_stats has no mean / std.
 
     Statistics use every report of a run (attackers included), as a server
     would; call this before filtering rows.
@@ -254,12 +257,17 @@ def apply_feature_set_v3(ds: NpyDataset) -> None:
         values, k_index, k_counts = np.unique(k, return_inverse=True, return_counts=True)
         out[rows, 3] = (k_counts / len(rows) - binom.pmf(values, domain, p_binomial))[k_index]
 
-    mu, sd = out.mean(axis=0), out.std(axis=0)
-    sd[sd < 1e-12] = 1.0
-    ds.features = ((out - mu) / sd).astype(np.float32)
     ds.feature_names = list(FEATURE_NAMES_V3)
-    ds.norm_stats = {'feature_names': list(FEATURE_NAMES_V3), 'mean': mu.tolist(),
-                     'std': sd.tolist(), 'derived_from': 'v2', 'runs': int(len(run_ids))}
+    if normalize:
+        mu, sd = out.mean(axis=0), out.std(axis=0)
+        sd[sd < 1e-12] = 1.0
+        ds.features = ((out - mu) / sd).astype(np.float32)
+        ds.norm_stats = {'feature_names': list(FEATURE_NAMES_V3), 'mean': mu.tolist(),
+                         'std': sd.tolist(), 'derived_from': 'v2', 'runs': int(len(run_ids))}
+    else:
+        ds.features = out
+        ds.norm_stats = {'feature_names': list(FEATURE_NAMES_V3), 'derived_from': 'v2',
+                         'runs': int(len(run_ids)), 'global_scale': 'not applied'}
     print(f"Feature set v3: {FEATURE_NAMES_V3} from {len(run_ids)} LDP runs "
           f"(per-run median/IQR; excess_share = observed - binomial share at k)")
 
