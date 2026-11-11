@@ -16,7 +16,10 @@
 # other two). Nothing existing is overwritten: new validation runs go to output/<data root>_val/, models and
 # results to results/<root>_bfix/, logs to results/beta_fixed_logs/.
 #
-# Stages (`all` = check val train igr pack):
+# Utility-selected thresholds for the trained models (no retraining; attacker_detector/utility_threshold.py):
+#   nohup bash scripts/run_beta_fixed.sh utility > /dev/null 2>&1 &      # = check uval uselect ueval igr pack
+#
+# Stages (`all` = check val train igr pack; `utility` = check uval uselect ueval igr pack):
 #   check  unit tests of the variant and of IGR (CPU, a few minutes)
 #   val    generate the validation source runs: one new complete run (n = 500,000) per eligible config,
 #          at the source beta, replicate indices from 1000 on (no seed shared with the main dataset)
@@ -25,9 +28,19 @@
 #   igr    IGR (and F1) of every model on re-simulated held-out runs at its frozen threshold, plus no
 #          defence, perfect removal and Diffstats (scripts/igr/run_igr_server.sh run collect)
 #   pack   results/beta_fixed_results.tar.gz: CSVs, thresholds, manifests, checkpoints (no predictions)
+#   uval     utility-validation runs: UVAL_REPS new complete runs per eligible config at the source beta
+#            (replicates 2000+), stored compactly in results/<root>/utility_val/ (scripts/igr/run_igr.py uval)
+#   uselect  per model: the threshold with the lowest mean IGR^2 on its utility-validation runs (source
+#            datasets only) -> threshold_utility.json next to threshold.json (which is kept)
+#   ueval    F1 sweep + 60,000-row test at threshold_utility.json from the stored held-out scores ->
+#            test_results_utility.csv, sensitivity_test_results_utility.csv (no retraining, no features)
+#   igr      (as above) now scores both frozen thresholds on the same re-simulated users; the previous
+#            igr_runs.csv is kept as igr_runs_f1threshold.csv. IGR_CACHE=all (default) keeps the held-out
+#            runs (~35 GB) so later thresholds can be scored without simulating again
 #
-# Env: PY, JOBS (parallel trainings, default 6), GPUS (default: all, e.g. "0 1 2"), SHARDS (IGR, default 16),
-#      ROOTS (subset of the four, space-separated), SKIP_TESTS=1.
+# Env: PY, JOBS (parallel trainings / evaluations, default 6), GPUS (default: all, e.g. "0 1 2"),
+#      SHARDS (simulation processes, default 16), PROC (threads each, default 4), UVAL_REPS (default 1),
+#      IGR_CACHE (all|none, default all), ROOTS (subset of the four, space-separated), SKIP_TESTS=1.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -35,6 +48,9 @@ CONDA_BASE=${CONDA_BASE:-/home/boby/miniconda3}
 PY=${PY:-$CONDA_BASE/envs/attacker-detector/bin/python}
 JOBS=${JOBS:-6}
 SHARDS=${SHARDS:-16}
+PROC=${PROC:-4}
+UVAL_REPS=${UVAL_REPS:-1}
+IGR_CACHE=${IGR_CACHE:-all}
 LOGS=results/beta_fixed_logs
 mkdir -p "$LOGS"
 exec > >(tee -a "$LOGS/run_beta_fixed.log") 2>&1
@@ -139,15 +155,73 @@ stage_train () {
 }
 
 stage_igr () {
+  local root
+  for root in "${ROOTS[@]}"; do      # keep the F1-threshold-only IGR table before runs are scored again
+    if ls results/$root/*/*/threshold_utility.json > /dev/null 2>&1 && [[ -f results/$root/igr/igr_runs.csv \
+          && ! -f results/$root/igr/igr_runs_f1threshold.csv ]]; then
+      cp results/$root/igr/igr_runs.csv results/$root/igr/igr_runs_f1threshold.csv
+    fi
+  done
   say "igr: frozen-threshold models + no defence + perfect removal + Diffstats on re-simulated held-out runs"
-  PY=$PY ROOTS="${ROOTS[*]}" BASELINES=diffstats SHARDS=$SHARDS SKIP_TESTS=1 \
+  PY=$PY ROOTS="${ROOTS[*]}" BASELINES=diffstats SHARDS=$SHARDS PROC=$PROC SKIP_TESTS=1 IGR_ARGS="--cache $IGR_CACHE" \
     bash scripts/igr/run_igr_server.sh plan run collect
+}
+
+stage_uval () {
+  local i pids=() bad=0
+  say "uval: $UVAL_REPS utility-validation run(s) per eligible config, $SHARDS shards x $PROC threads"
+  for (( i = 0; i < SHARDS; i++ )); do
+    "$PY" scripts/igr/run_igr.py uval --roots "${ROOTS[@]}" --uval-replicates "$UVAL_REPS" --shard "$i" \
+        --num-shards "$SHARDS" --processors "$PROC" > "$LOGS/uval_shard$i.log" 2>&1 &
+    pids+=($!)
+  done
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || { bad=1; say "  uval shard $i had failures -- grep -A5 FAILED $LOGS/uval_shard$i.log"; }
+  done
+  say "uval: $(cat "$LOGS"/uval_shard*.log | grep -c 'no-defence IGR') runs simulated in this pass"
+  return $bad
+}
+
+stage_uselect () {
+  say "uselect: mean-IGR^2 threshold per model on its utility-validation runs"
+  CUDA_VISIBLE_DEVICES=${GPU_LIST[0]:-} "$PY" scripts/igr/run_igr.py uselect --roots "${ROOTS[@]}" \
+      > "$LOGS/uselect.log" 2>&1
+  local rc=$?
+  grep -E "utility threshold|FAILED|uselect:" "$LOGS/uselect.log" | cut -c1-230
+  return $rc
+}
+
+eval_one () {   # $1 = model dir
+  local d=$1
+  if [[ -f $d/sensitivity_test_results_utility.csv && $d/sensitivity_test_results_utility.csv -nt $d/threshold_utility.json ]]; then
+    echo "  skip $d"; return 0
+  fi
+  "$PY" -m attacker_detector.reference_beta evaluate "$d" threshold_utility.json utility \
+      > "$LOGS/ueval_$(echo "$d" | tr '/' '_').log" 2>&1 || { echo "  FAILED $d"; return 1; }
+  tail -1 "$LOGS/ueval_$(echo "$d" | tr '/' '_').log" | cut -c1-200
+}
+
+stage_ueval () {
+  local d bad=0 dirs=() root
+  for root in "${ROOTS[@]}"; do
+    for d in results/$root/in_dist/* results/$root/cross/*; do
+      [[ -f $d/threshold_utility.json ]] && dirs+=("$d")
+    done
+  done
+  say "ueval: ${#dirs[@]} models at threshold_utility.json, $JOBS at a time"
+  for d in "${dirs[@]}"; do
+    while (( $(jobs -rp | wc -l) >= JOBS )); do wait -n || bad=1; done
+    eval_one "$d" &
+  done
+  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || bad=1; done
+  return $bad
 }
 
 stage_pack () {
   local files
   files=$(find results/*_bfix -type f ! -name 'test_predictions.npz' ! -path '*/igr/cache/*' \
-              ! -path '*/igr/runs/*' ! -name '*.lock' 2>/dev/null)
+              ! -path '*/igr/runs/*' ! -name '*.lock' ! -path '*/utility_val/*.npz' ! -name '*.tmp*' \
+              2>/dev/null)
   [[ -z $files ]] && { say "pack: nothing to pack"; return 1; }
   # shellcheck disable=SC2086
   tar czf results/beta_fixed_results.tar.gz $files $LOGS/*.log
@@ -157,10 +231,11 @@ stage_pack () {
 }
 
 STAGES=("$@")
-(( ${#STAGES[@]} )) || { sed -n '2,32p' "$0"; exit 1; }
+(( ${#STAGES[@]} )) || { sed -n '2,48p' "$0"; exit 1; }
 [[ ${STAGES[*]} == all ]] && STAGES=(check val train igr pack)
+[[ ${STAGES[*]} == utility ]] && STAGES=(check uval uselect ueval igr pack)
 for s in "${STAGES[@]}"; do
-  case $s in check|val|train|igr|pack) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
+  case $s in check|val|train|igr|pack|uval|uselect|ueval) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
 done
 say "=== run_beta_fixed.sh ${STAGES[*]}  (PY=$PY, roots: ${ROOTS[*]})"
 for s in "${STAGES[@]}"; do

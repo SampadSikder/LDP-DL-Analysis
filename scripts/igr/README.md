@@ -110,3 +110,16 @@ Outputs per root are in `results/<root>/igr/`:
 - `cache/`: the WSP cells only, about 2 GB.
 - `v3_norm_*.json`, `design_*.json`
 - `igr_runs.csv`, `igr_f1_check.csv`
+
+
+## Reference-beta models (beta-fixed run)
+
+Models trained by `main.py --source-beta` (results roots `*_bfix`, launcher `scripts/run_beta_fixed.sh`) carry
+their own scaler and one or two frozen thresholds. IGR scores each of them unchanged:
+
+| file | row variant | chosen by |
+| --- | --- | --- |
+| `threshold.json` | `frozen` | attacker-class F1 on validation runs re-weighted to the source beta |
+| `threshold_utility.json` | `frozen_utility` | lowest mean IGR² on utility-validation runs (`run_igr.py uval` + `uselect`) |
+
+A model without `threshold.json` fails; there is no 0.5 fallback.

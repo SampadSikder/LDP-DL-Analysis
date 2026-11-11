@@ -51,10 +51,14 @@ SERIES = {
                                lw=2.0, ms=4.5, fill='full'),
     'ours_cross_prior':   dict(label='Ours (cross-dataset), cut-off 1−β_train', color=VIOLET, ls='--', marker='D',
                                lw=1.6, ms=4.5, fill='none'),
-    'ours_in_dist_frozen': dict(label='Ours (in-distribution), β=β_src training, validation threshold',
+    'ours_in_dist_frozen': dict(label='Ours (in-distribution), β_src training, F1 threshold',
                                 color=ORANGE, ls='-', marker='s', lw=2.0, ms=4.5, fill='full'),
-    'ours_cross_frozen':   dict(label='Ours (cross-dataset), β=β_src training, validation threshold',
+    'ours_cross_frozen':   dict(label='Ours (cross-dataset), β_src training, F1 threshold',
                                 color=ORANGE, ls='--', marker='s', lw=1.6, ms=4.5, fill='none'),
+    'ours_in_dist_utility': dict(label='Ours (in-distribution), β_src training, utility threshold (mean IGR²)',
+                                 color=VIOLET, ls='-', marker='D', lw=2.0, ms=4.5, fill='full'),
+    'ours_cross_utility':   dict(label='Ours (cross-dataset), β_src training, utility threshold (mean IGR²)',
+                                 color=VIOLET, ls='--', marker='D', lw=1.6, ms=4.5, fill='none'),
     'fiad':         dict(label='FIAD', color=ORANGE, ls='--', marker='^', lw=1.4, ms=5, fill='none'),
     'diffstats':    dict(label='Diffstats', color=AQUA, ls=':', marker='s', lw=1.4, ms=4.5, fill='none'),
     'no_defense':   dict(label='No defence', color=MUTED, ls='-', marker='x', lw=1.2, ms=4.5, fill='full'),
@@ -102,6 +106,9 @@ def load(root):
     frozen = df.variant == 'frozen'
     df.loc[frozen, 'detector'] = df.loc[frozen, 'detector'] + '_frozen'
     df.loc[frozen, 'variant'] = 'original'
+    utility = df.variant == 'frozen_utility'
+    df.loc[utility, 'detector'] = df.loc[utility, 'detector'] + '_utility'
+    df.loc[utility, 'variant'] = 'original'
     designs = {}
     for f in glob.glob(os.path.join(RESULTS, root, 'igr', 'design_*.json')):
         with open(f) as fh:

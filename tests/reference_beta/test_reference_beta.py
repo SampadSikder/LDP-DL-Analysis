@@ -265,6 +265,73 @@ class TestThreshold(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------------------------
+# utility-selected threshold
+# ------------------------------------------------------------------------------------------
+
+class TestUtility(unittest.TestCase):
+    def _run(self, rng, n=400, beta=0.1):
+        from attacker_detector.utility_threshold import UtilityRun
+        y = (np.arange(n) >= n - int(beta * n)).astype(np.int8)
+        ts = rng.integers(0, 4, size=n).astype(float) + 6.0 * y      # attackers support many targets
+        run = {'attacker_ratio': beta, 'target_set_size': 10, 'dataset_type': 'fire', 'epsilon': 1.0,
+               'splits': 4, 'replicate': 2000, 'seed': 1}
+        return UtilityRun(run, np.zeros((n, 4)), y, ts, A=2.0, B=0.1, true_t=0.6)
+
+    def test_curve_is_exact(self):
+        from attacker_detector.utility_threshold import igr_curve
+        rng = np.random.default_rng(0)
+        u = self._run(rng)
+        s = np.round(rng.normal(size=u.n), 1)                        # many ties
+        thr = np.r_[np.inf, np.unique(s)[::-1] - 1e-9, -np.inf, 0.0, 0.05]
+        got = igr_curve(s, u, thr)
+        for t, g in zip(thr, got):
+            want = u.igr(rb.decide(s, t))
+            self.assertTrue((np.isnan(g) and np.isnan(want)) or abs(g - want) < 1e-12, (t, g, want))
+
+    def test_curve_matches_rundata_on_a_simulated_run(self):
+        from attacker_detector import igr
+        from attacker_detector.utility_threshold import UtilityRun, igr_curve
+        from config import DATASET_CONFIGS
+        run = dict(root='x', dataset_type='fire', protocol='OUE', epsilon=1.0, attacker_ratio=0.1,
+                   target_set_size=10, splits=4, replicate=1, n=1500,
+                   domain=DATASET_CONFIGS['fire']['domain'], h_ao=0, seed=3)
+        X, targets, support, labels, _, _ = igr.simulate(run, 1)
+        rd = igr.RunData(run, labels, targets, igr.genuine_frequency(X, labels, run['domain']),
+                         igr.Support.from_dense(support), np.zeros((len(labels), 4)))
+        u = UtilityRun.from_rundata(rd)
+        s = np.random.default_rng(1).normal(size=u.n) + 2 * rd.labels
+        for t in (np.inf, 2.0, 1.0, 0.0):
+            self.assertAlmostEqual(igr_curve(s, u, [t])[0], rd.metrics(rb.decide(s, t))['igr'], places=10)
+
+    def test_select(self):
+        from attacker_detector.utility_threshold import select, summarize, candidate_thresholds
+        rng = np.random.default_rng(2)
+        runs = [self._run(rng) for _ in range(3)]
+        scores = [rng.normal(size=u.n) + 3 * u.labels for u in runs]
+        thr, obj, cand = select(scores, runs)
+        self.assertNotEqual(thr, -np.inf)                             # flag-all is never a candidate
+        self.assertTrue(np.isfinite(cand[1:]).all())
+        self.assertAlmostEqual(obj.min(), summarize(thr, scores, runs)['mean_igr2'], places=12)
+        self.assertLessEqual(obj.min(), summarize(np.inf, scores, runs)['mean_igr2'])
+        self.assertEqual(len(cand), len(np.unique(np.concatenate(scores))))
+        # nobody's removal moves the estimate -> every candidate ties -> the highest (flag none)
+        from attacker_detector.utility_threshold import UtilityRun
+        flat = UtilityRun(runs[0].run, np.zeros((50, 4)), np.r_[np.zeros(45), np.ones(5)], np.full(50, 2.0),
+                          A=1.0, B=0.0, true_t=1.5)
+        self.assertEqual(select([np.linspace(0, 1, 50)], [flat])[0], np.inf)
+
+    def test_cache_roundtrip(self):
+        from attacker_detector.utility_threshold import UtilityRun
+        u = self._run(np.random.default_rng(4))
+        with tempfile.TemporaryDirectory() as t:
+            u.save(os.path.join(t, 'a', 'r.npz'))
+            v = UtilityRun.load(os.path.join(t, 'a', 'r.npz'))
+        f = np.r_[np.zeros(u.n - 30, bool), np.ones(30, bool)]
+        self.assertAlmostEqual(u.igr(f), v.igr(f), places=12)
+        self.assertEqual(v.run['replicate'], 2000)
+
+
+# ------------------------------------------------------------------------------------------
 # main.py end to end
 # ------------------------------------------------------------------------------------------
 
@@ -311,6 +378,34 @@ class TestCLI(_Data):
         self.assertIn('nothing to do', self.cli('--dataset', 'fire', '-o', out).stdout)
         p = self.cli('--dataset', 'fire', '-o', out, '--threshold-reference-beta', '0.1', ok=False)
         self.assertNotEqual(p.returncode, 0)
+        # re-evaluation from the stored scores reproduces the run's own outputs at threshold.json exactly
+        cwd = os.getcwd()
+        try:
+            os.chdir(ROOT)
+            rb.evaluate_threshold(out, 'threshold.json', 'check')
+        finally:
+            os.chdir(cwd)
+        for name in ('test_results', 'sensitivity_test_results', 'sensitivity_test_balanced'):
+            a = pd.read_csv(os.path.join(out, f'{name}.csv'))
+            b = pd.read_csv(os.path.join(out, f'{name}_check.csv'))
+            cols = [c for c in a.columns if c in ('Parameter_Type', 'Value', 'Accuracy', 'Precision', 'Recall',
+                                                  'F1_Score', 'Count', 'Attackers', 'n_samples', 'Threshold')]
+            pd.testing.assert_frame_equal(a[cols], b[cols], check_exact=False, rtol=1e-12, obj=name)
+        # ... and at another frozen threshold file it stamps and applies that one
+        u = json.load(open(os.path.join(out, 'threshold.json')))
+        u['threshold'] = rec['threshold'] + 1.0
+        json.dump(u, open(os.path.join(out, 'threshold_utility.json'), 'w'))
+        cwd = os.getcwd()
+        try:
+            os.chdir(ROOT)
+            rb.evaluate_threshold(out, 'threshold_utility.json', 'utility')
+        finally:
+            os.chdir(cwd)
+        su = pd.read_csv(os.path.join(out, 'sensitivity_test_results_utility.csv'))
+        self.assertTrue(np.allclose(su.Threshold, rec['threshold'] + 1.0))
+        pu = rb.decide(z['logit'], rec['threshold'] + 1.0)
+        f1u = 2 * (pu & y).sum() / max(1, 2 * (pu & y).sum() + (pu & ~y).sum() + (~pu & y).sum())
+        self.assertAlmostEqual(float(su[su.Parameter_Type == 'overall'].F1_Score.iloc[0]), f1u, places=6)
         # a folder of the standard pipeline is never overwritten
         old = os.path.join(self.tmp, 'old'); os.makedirs(old); open(os.path.join(old, 'model.pt'), 'w').close()
         self.assertNotEqual(self.cli('--dataset', 'fire', '-o', old, ok=False).returncode, 0)

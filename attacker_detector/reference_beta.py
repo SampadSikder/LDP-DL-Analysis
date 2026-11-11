@@ -193,10 +193,11 @@ def save_threshold(model_dir, record):
     _write_json(os.path.join(model_dir, 'threshold.json'), rec)
 
 
-def load_threshold(model_dir):
-    """The frozen threshold record of a model directory. No fallback: a model of this variant
-    without its threshold cannot be evaluated."""
-    path = os.path.join(model_dir, 'threshold.json')
+def load_threshold(model_dir, name='threshold.json'):
+    """A frozen threshold record of a model directory (threshold.json = F1-selected,
+    threshold_utility.json = utility-selected). No fallback: a model of this variant without
+    its threshold cannot be evaluated."""
+    path = os.path.join(model_dir, name)
     if not os.path.exists(path):
         raise FileNotFoundError(
             f'{path} is missing. A {VARIANT} model is only evaluated at its validation-selected '
@@ -708,10 +709,107 @@ def run(args):
     print('\nDone!')
 
 
-if __name__ == '__main__':      # python -m attacker_detector.reference_beta gen-args <data dir> <beta>
+# ------------------------------------------------------------------------------------------
+# re-evaluation at another frozen threshold (no retraining, no feature rebuild)
+# ------------------------------------------------------------------------------------------
+
+class _Rows:
+    """The few NpyDataset attributes the held-out selection reads."""
+
+    def __init__(self, config, labels):
+        self.config, self.labels = config, labels
+
+
+def heldout_positions(data_path, protocol, dataset, test_dataset, test_samples, seed):
+    """(held-out labels, positions of the 60,000-row test sample within the held-out rows, positions of
+    the balanced view, held-out config rows) -- rebuilt exactly as build_split selects them, from
+    config.npy and labels.npy only. Held-out rows come in the order test_predictions.npz stores them."""
+    from sklearn.model_selection import train_test_split
+    from .data.dataset import (_CONF_DATASET_TYPE, _CONF_HOLDOUT, _CONF_PROTOCOL, _balanced_per_group,
+                               _config_groups)
+    config = np.load(os.path.join(data_path, 'config.npy'), mmap_mode='r', allow_pickle=False)
+    labels = np.load(os.path.join(data_path, 'labels.npy'), mmap_mode='r')
+    keep = np.flatnonzero(np.asarray(config[:, _CONF_PROTOCOL]) == protocol)
+    if dataset:
+        keep = keep[np.asarray(config[keep, _CONF_DATASET_TYPE]) == dataset]
+    rows = _Rows(np.asarray(config[keep]), np.asarray(labels[keep]).astype(np.float32))
+    y = rows.labels.astype(int)
+    hold = rows.config[:, _CONF_HOLDOUT].astype(np.int8)
+    held = np.where((hold == 1) & (rows.config[:, _CONF_DATASET_TYPE] == test_dataset))[0]
+    held_groups = _config_groups(rows, held)
+    held_strata = held_groups * 2 + y[held]
+    if test_samples >= len(held):
+        test_idx = held
+    else:
+        test_idx, _ = train_test_split(held, train_size=test_samples, random_state=seed, stratify=held_strata)
+    per_class_held = int(np.bincount(held_strata).max())
+    sens_bal, _ = _balanced_per_group(held, held_groups, y[held], per_class_held, np.random.default_rng(seed))
+    pos = np.full(len(rows.labels), -1, dtype=np.int64)
+    pos[held] = np.arange(len(held))
+    return rows.labels[held], pos[test_idx], pos[np.sort(sens_bal)], rows.config[held]
+
+
+def evaluate_threshold(model_dir, threshold_name, suffix):
+    """F1 sweep and 60,000-row test of a finished model at another frozen threshold file, from its
+    stored held-out scores (test_predictions.npz). Writes test_results_<suffix>.csv,
+    sensitivity_test_results_<suffix>.csv and sensitivity_test_balanced_<suffix>.csv."""
+    import torch
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+    from .analysis import run_sensitivity_analysis
+
+    with open(os.path.join(model_dir, 'variant.json')) as f:
+        var = json.load(f)
+    if var.get('status') != 'complete':
+        raise RuntimeError(f'{model_dir} is not a complete {VARIANT} run')
+    ident = var['identity']
+    rec = load_threshold(model_dir, threshold_name)
+    model_sha = file_sha256(os.path.join(model_dir, 'model.pt'))
+    if rec['model']['checkpoint_sha256'] != model_sha:
+        raise RuntimeError(f'{threshold_name} of {model_dir} was selected for another checkpoint')
+    thr = rec['threshold']
+    pred_path = os.path.join(model_dir, 'test_predictions.npz')
+    if not os.path.exists(pred_path):
+        raise FileNotFoundError(f'{pred_path} is missing (train with --save-predictions)')
+    z = np.load(pred_path)
+    cross = ident['training_method'] == 'cross'
+    test_dataset = ident['test_dataset'] if cross else ident['dataset']
+    y_held, test_pos, bal_pos, conf_held = heldout_positions(
+        ident['data']['path'], ident['protocol'], None if cross else ident['dataset'], test_dataset,
+        ident['test_samples'], ident['seed'])
+    if len(y_held) != len(z['label']) or not np.array_equal(y_held.astype(np.int8), z['label']):
+        raise RuntimeError(f'{model_dir}: the rebuilt held-out rows do not match test_predictions.npz')
+    logits = z['logit'].astype(np.float32)
+    stamp = {'Threshold': thr, 'Model_SHA256': model_sha[:16], 'Threshold_File': threshold_name}
+
+    pred = decide(logits[test_pos], thr).astype(int)
+    yt = y_held[test_pos].astype(int)
+    label = f'Test ({test_dataset})' if cross else 'Test'
+    pd.DataFrame([{'label': label, 'n_samples': len(yt), 'Accuracy': accuracy_score(yt, pred),
+                   'Precision': precision_score(yt, pred, zero_division=0),
+                   'Recall': recall_score(yt, pred, zero_division=0), 'F1_Score': f1_score(yt, pred, zero_division=0),
+                   **stamp, 'Threshold_Probability': _sigmoid(thr), 'Source_Beta': ident['source_beta']}]
+                 ).to_csv(os.path.join(model_dir, f'test_results_{suffix}.csv'), index=False)
+
+    # the stored logits through the same sensitivity code (an identity "model" returns them)
+    ident_model, dev = torch.nn.Identity(), torch.device('cpu')
+    with open(os.path.join(ident['data']['path'], 'design.json')) as f:
+        oat_defaults = json.load(f)['defaults']
+    for rows, name in ((np.arange(len(y_held)), 'sensitivity_test_results'), (bal_pos, 'sensitivity_test_balanced')):
+        run_sensitivity_analysis(ident_model, logits[rows].reshape(-1, 1), y_held[rows], dev,
+                                 config_array=conf_held[rows], batch_size=1 << 20, oat_defaults=oat_defaults,
+                                 logit_threshold=thr).assign(**stamp).to_csv(
+            os.path.join(model_dir, f'{name}_{suffix}.csv'), index=False)
+    print(f'{model_dir}: {threshold_name} logit > {thr:.6g} -> test F1 '
+          f'{f1_score(yt, pred, zero_division=0):.4f} ({suffix})')
+
+
+if __name__ == '__main__':
     import sys
     if len(sys.argv) == 4 and sys.argv[1] == 'gen-args':
         with open(os.path.join(sys.argv[2], 'design.json')) as fh:
             print(' '.join(validation_generation_args(json.load(fh), float(sys.argv[3]))))
+    elif len(sys.argv) == 5 and sys.argv[1] == 'evaluate':
+        evaluate_threshold(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
-        sys.exit('usage: python -m attacker_detector.reference_beta gen-args <data dir> <source beta>')
+        sys.exit('usage: python -m attacker_detector.reference_beta gen-args <data dir> <source beta>\n'
+                 '       python -m attacker_detector.reference_beta evaluate <model dir> <threshold file> <suffix>')

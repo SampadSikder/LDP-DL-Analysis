@@ -7,6 +7,8 @@ FIAD vs Diffstats on the same simulated users. Definition and method: attacker_d
   python scripts/igr/run_igr.py run --baselines diffstats  # skip FIAD (most of the run time)
   python scripts/igr/run_igr.py wsp                      # after Codex: WSP-edited models on cached runs
   python scripts/igr/run_igr.py collect                  # merge + F1 check vs the stored predictions
+  python scripts/igr/run_igr.py uval --roots <root>_bfix  # utility-validation runs (reference-beta models)
+  python scripts/igr/run_igr.py uselect --roots <root>_bfix  # threshold_utility.json per model (mean IGR^2)
 
 Outputs per results root (results/<root>/igr/):
   runs/<Dataset>_<PROTOCOL>/<run>.csv      one row per detector; our models twice, variant 'original'
@@ -205,14 +207,18 @@ def _row(run, detector, m, seconds, variant='', model_seed='', budget='', prior_
 
 
 def _frozen(model_path):
-    """(scaler, threshold record) of a reference-beta model; fails without them (no 0.5 fallback),
-    and checks the checkpoint is the one the threshold was selected for."""
+    """(scaler, [(row variant, threshold record), ...]) of a reference-beta model; fails without
+    threshold.json (no 0.5 fallback) and checks every threshold was selected for this checkpoint."""
     mdir = os.path.dirname(model_path)
-    rec = refbeta.load_threshold(mdir)
     sha = refbeta.file_sha256(model_path)
-    if sha != rec['model']['checkpoint_sha256']:
-        raise RuntimeError(f'{model_path} is not the checkpoint its threshold.json was selected for')
-    return refbeta.load_scaler(mdir), rec
+    recs = []
+    for name, variant in FROZEN_FILES:
+        if name == 'threshold.json' or os.path.exists(os.path.join(mdir, name)):
+            rec = refbeta.load_threshold(mdir, name)          # threshold.json is required
+            if sha != rec['model']['checkpoint_sha256']:
+                raise RuntimeError(f'{model_path} is not the checkpoint its {name} was selected for')
+            recs.append((variant, rec))
+    return refbeta.load_scaler(mdir), recs
 
 
 def _write_rows(path, rows):
@@ -225,14 +231,25 @@ def _write_rows(path, rows):
 BASELINE_METHODS = ('fiad', 'diffstats')
 
 
-def _finished(out_csv, methods):
-    """The run's CSV exists, has a row for every baseline asked for and has our models at both
-    cut-offs. A run missing any of them is simulated again, so all of its rows stay on the same users."""
+def _finished(out_csv, methods, need_variants=()):
+    """The run's CSV exists, has a row for every baseline asked for and has our models at every cut-off
+    they need (both standard cut-offs, or each frozen threshold file a reference-beta model has). A run
+    missing any of them is simulated again, so all of its rows stay on the same users."""
     if not os.path.exists(out_csv):
         return False
     df = pd.read_csv(out_csv, usecols=['detector', 'variant'], keep_default_na=False)
     ours = set(df.loc[df.detector.str.startswith('ours'), 'variant'])
-    return set(methods) <= set(df.detector) and (not ours or 'prior' in ours or 'frozen' in ours)
+    if not set(methods) <= set(df.detector) or not set(need_variants) <= ours:
+        return False
+    return not ours or 'prior' in ours or 'frozen' in ours
+
+
+# frozen threshold files of a reference-beta model -> IGR row variant
+FROZEN_FILES = (('threshold.json', 'frozen'), ('threshold_utility.json', 'frozen_utility'))
+
+
+def _frozen_variants(model_dir):
+    return [v for name, v in FROZEN_FILES if os.path.exists(os.path.join(model_dir, name))]
 
 
 def process_run(run, args, models, cache_cells):
@@ -245,7 +262,9 @@ def process_run(run, args, models, cache_cells):
     cache = (root, cell) in cache_cells
     cache_path = os.path.join(igr_dir(root), 'cache', cell, igr.run_tag(run) + '.npz')
     methods = [m for m in BASELINE_METHODS if m in args.baselines]
-    if _finished(out_csv, methods) and (not cache or os.path.exists(cache_path)):
+    need = sorted({v for _, path in original_models(root, dataset, protocol) if os.path.exists(path)
+                   for v in _frozen_variants(os.path.dirname(path))})
+    if _finished(out_csv, methods, need) and (not cache or os.path.exists(cache_path)):
         return None
 
     design = design_for(root, protocol, run['data_dir'])
@@ -283,12 +302,13 @@ def process_run(run, args, models, cache_cells):
             continue
         t1 = time.time()
         if path in frozen_models:
-            # reference-beta model: its own optimization-row scaler and its frozen threshold, nothing else
-            scaler, rec = frozen_models[path]
+            # reference-beta model: its own optimization-row scaler and each of its frozen thresholds
+            scaler, recs = frozen_models[path]
             logit = igr.ft_logits(models.get(path), igr.model_input(feats, scaler), models.device)
-            rows.append(_row(run, det, rd.metrics(refbeta.decide(logit, rec['threshold'])), time.time() - t1,
-                             variant='frozen', threshold=rec['threshold'],
-                             model_sha=rec['model']['checkpoint_sha256'][:16]))
+            for variant, rec in recs:
+                rows.append(_row(run, det, rd.metrics(refbeta.decide(logit, rec['threshold'])),
+                                 time.time() - t1, variant=variant, threshold=rec['threshold'],
+                                 model_sha=rec['model']['checkpoint_sha256'][:16]))
             continue
         logit = igr.ft_logits(models.get(path), Xm, models.device)
         rows.append(_row(run, det, rd.metrics(logit > 0), time.time() - t1, variant='original'))
@@ -453,9 +473,132 @@ def cmd_collect(args):
     return 0
 
 
+# ------------------------------------------------------------------------------------------
+# utility-selected thresholds (attacker_detector/utility_threshold.py)
+# ------------------------------------------------------------------------------------------
+
+def uval_dir(root):
+    return os.path.join(res_dir(root), 'utility_val')
+
+
+def plan_uval(args):
+    """New complete runs of every validation config (output/<data root>_val/<P>/design.json: the model's
+    eligible configs, all at the source beta), replicate indices from utility_threshold.REPLICATE_OFFSET."""
+    from config import DATASET_CONFIGS
+    from generate_dataset import ATTACK_H_AO, _oat_seed
+    from attacker_detector import utility_threshold as ut
+    data_map = dict(kv.split('=', 1) for kv in (args.data_map or []))
+    runs = []
+    for root in args.roots:
+        for protocol in args.protocols:
+            main_dir = data_dir(root, protocol, data_map)
+            vdir = os.path.join(os.path.dirname(main_dir) + '_val', protocol)
+            if not os.path.exists(os.path.join(vdir, 'design.json')):
+                say(f'[WARN] {vdir}/design.json missing; {root} {protocol} skipped')
+                continue
+            with open(os.path.join(vdir, 'design.json')) as f:
+                vd = json.load(f)
+            if vd.get('role') != 'validation':
+                raise ValueError(f'{vdir} is not a validation-run directory')
+            seed = int(vd.get('seed') or args.seed)
+            for g in vd['runs']:
+                if args.datasets and g['dataset_type'] not in args.datasets:
+                    continue
+                for j in range(args.uval_replicates):
+                    rep = ut.REPLICATE_OFFSET + j
+                    runs.append({
+                        'root': root, 'data_dir': main_dir, 'attack': vd['attack'],
+                        'dataset_type': g['dataset_type'], 'protocol': g['protocol'], 'epsilon': g['epsilon'],
+                        'attacker_ratio': g['attacker_ratio'], 'target_set_size': g['target_set_size'],
+                        'splits': g['splits'], 'replicate': rep, 'n': int(vd['n']),
+                        'domain': DATASET_CONFIGS[g['dataset_type']]['domain'], 'h_ao': ATTACK_H_AO[vd['attack']],
+                        'seed': _oat_seed(seed, g['dataset_type'], g['protocol'], g['epsilon'],
+                                          g['attacker_ratio'], g['target_set_size'], g['splits'], rep)})
+    return runs
+
+
+def cmd_uval(args):
+    from attacker_detector.data.generators import extract_user_level_features_diffstats_style
+    from attacker_detector import utility_threshold as ut
+    runs = plan_uval(args)
+    mine = runs[args.shard::args.num_shards]
+    say(f'uval shard {args.shard}/{args.num_shards}: {len(mine)} of {len(runs)} utility-validation runs')
+    failed = 0
+    for i, run in enumerate(mine, 1):
+        cell = igr.cell_name(run['dataset_type'], run['protocol'])
+        path = os.path.join(uval_dir(run['root']), cell, igr.run_tag(run) + '.npz')
+        desc = f"[{i}/{len(mine)}] {run['root']} {cell} {igr.run_tag(run)}"
+        if os.path.exists(path):
+            say(f'{desc}  (done)')
+            continue
+        try:
+            t0 = time.time()
+            design = design_for(run['root'], run['protocol'], run['data_dir'])
+            X, targets, support, labels, estimate, one_list = igr.simulate(run, args.processors)
+            n, d = len(labels), int(run['domain'])
+            sup = igr.Support.from_dense(support)
+            v2 = extract_user_level_features_diffstats_style(
+                support_list=support, one_list=one_list, epsilon=float(run['epsilon']), protocol=run['protocol'],
+                domain=d, n=n, feature_set=design['feature_set'], block_candidates=design['block_candidates'])
+            del support
+            feats = igr.v3_features(v2, run, labels)
+            rd = igr.RunData(run, labels, targets, igr.genuine_frequency(X, labels, d), sup, feats)
+            dev = np.abs(rd.estimate() * n - estimate).max() / max(1.0, np.abs(estimate).max())
+            if dev > 1e-6:
+                raise RuntimeError(f'estimator does not reproduce the generator estimate (rel. dev {dev:.2e})')
+            u = ut.UtilityRun.from_rundata(rd)
+            u.save(path)
+            say(f'{desc}  sim+feats {time.time() - t0:.0f}s  no-defence IGR {u.igr(np.zeros(n, bool)):+.3f}')
+        except Exception as e:
+            import traceback
+            failed += 1
+            say(f'{desc}  FAILED: {e}\n{traceback.format_exc()}')
+    say(f'uval shard {args.shard} finished; {failed} failed')
+    return 1 if failed else 0
+
+
+def cmd_uselect(args):
+    import torch
+    from attacker_detector import utility_threshold as ut
+    device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
+                          else ('cpu' if args.device == 'auto' else args.device))
+    models = Models(device)
+    failed = 0
+    rows = []
+    for root in args.roots:
+        for kind in ('in_dist', 'cross'):
+            for mdir in sorted(glob.glob(os.path.join(res_dir(root), kind, '*'))):
+                if not refbeta.is_variant_dir(mdir):
+                    continue
+                proto = refbeta.load_threshold(mdir)['protocol']
+                if proto not in args.protocols:
+                    continue
+                try:
+                    out = ut.select_for_model(mdir, [uval_dir(root)], models.get(os.path.join(mdir, 'model.pt')),
+                                              device, igr.ft_logits, igr.model_input)
+                except Exception as e:
+                    failed += 1
+                    say(f'{mdir}  FAILED: {e}')
+                    continue
+                ref = out['reference']
+                say(f"{os.path.relpath(mdir, RESULTS)}: utility threshold p > {out['threshold_probability']:.4f} "
+                    f"(F1 threshold p > {refbeta._sigmoid(refbeta.load_threshold(mdir)['threshold']):.4f})  "
+                    f"mean IGR^2 {out['validation_mean_igr2']:.4f} (F1 thr {ref['at_f1_threshold']['mean_igr2']:.4f}, "
+                    f"none {ref['no_defense']['mean_igr2']:.4f})  mean IGR {out['validation_mean_igr']:+.3f}  "
+                    f"flagged {100 * out['validation_flagged_share']:.1f}%  on {out['validation_runs']} runs")
+                rows.append({'model_dir': os.path.relpath(mdir, RESULTS), 'threshold': out['threshold'],
+                             'threshold_probability': out['threshold_probability'],
+                             **{k: v for k, v in out.items() if k.startswith('validation_') and k != 'validation_per_run_igr'}})
+        if rows:
+            pd.DataFrame([r for r in rows if r['model_dir'].startswith(root + os.sep)]).to_csv(
+                os.path.join(uval_dir(root), 'utility_thresholds.csv'), index=False)
+    say(f'uselect: {len(rows)} models, {failed} failed')
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('cmd', choices=['norms', 'run', 'wsp', 'collect', 'plan'])
+    ap.add_argument('cmd', choices=['norms', 'run', 'wsp', 'collect', 'plan', 'uval', 'uselect'])
     ap.add_argument('--roots', nargs='+', default=V3F_ROOTS)
     ap.add_argument('--protocols', nargs='+', default=PROTOCOLS, choices=PROTOCOLS)
     ap.add_argument('--datasets', nargs='+', choices=['zipf', 'emoji', 'fire'])
@@ -469,6 +612,8 @@ def main():
     ap.add_argument('--device', default='auto')
     ap.add_argument('--cache', choices=['wsp', 'all', 'none'], default='wsp',
                     help='which runs keep reports + features for scoring models later (wsp = cells the WSP runs test on)')
+    ap.add_argument('--uval-replicates', type=int, default=1,
+                    help='uval: utility-validation runs per eligible config (replicates 2000, 2001, ...)')
     ap.add_argument('--baselines', nargs='*', choices=BASELINE_METHODS, default=list(BASELINE_METHODS),
                     help='baseline detectors scored next to ours (default: both). --baselines diffstats skips '
                          'FIAD, which takes most of the run time; --baselines with no names scores ours only')
@@ -479,7 +624,8 @@ def main():
         print(cells.value_counts(sort=False).to_string())
         print(f'{len(runs)} runs')
         return 0
-    return {'norms': cmd_norms, 'run': cmd_run, 'wsp': cmd_wsp, 'collect': cmd_collect}[args.cmd](args)
+    return {'norms': cmd_norms, 'run': cmd_run, 'wsp': cmd_wsp, 'collect': cmd_collect,
+            'uval': cmd_uval, 'uselect': cmd_uselect}[args.cmd](args)
 
 
 if __name__ == '__main__':

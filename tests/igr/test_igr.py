@@ -205,7 +205,9 @@ class TestCLI(unittest.TestCase):
         with open(os.path.join(d, 'variant.json'), 'w') as f:
             json.dump({'variant': rb.VARIANT}, f)
         rb.save_threshold(d, {'threshold': 0.25, 'score_scale': rb.SCORE_SCALE,
-                              'decision_operator': rb.DECISION_OPERATOR,
+                              'decision_operator': rb.DECISION_OPERATOR, 'protocol': 'OUE',
+                              'train_datasets': ['fire'], 'test_dataset': 'fire', 'training_method': 'none',
+                              'source_beta': 0.1, 'seed': 42,
                               'model': {'checkpoint_sha256': rb.file_sha256(os.path.join(d, 'model.pt'))}})
         os.rename(os.path.join(d, 'threshold.json'), os.path.join(d, 'threshold.json.bak'))
         out = self.cli('run', '--baselines', root=root, ok=False)
@@ -220,6 +222,35 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(float(ours.threshold.iloc[0]), 0.25)
         self.assertNotIn('v3_norm_OUE.json', os.listdir(os.path.join(self.results, root, 'igr')))
         self.assertIn('(done)', self.cli('run', '--baselines', root=root))  # resumable
+
+        # utility threshold: utility-validation runs at the source beta, then mean IGR^2 selection
+        vdir = os.path.join(os.path.dirname(self.data), os.path.basename(self.data) + '_val', 'OUE')
+        os.makedirs(vdir, exist_ok=True)
+        with open(os.path.join(vdir, 'design.json'), 'w') as fh:
+            json.dump({'design': 'oat', 'role': 'validation', 'attack': 'mga-a', 'n': 1200, 'seed': 42,
+                       'runs': [{'dataset_type': 'fire', 'protocol': 'OUE', 'epsilon': e, 'attacker_ratio': 0.1,
+                                 'target_set_size': 10, 'splits': 4, 'train': 1, 'holdout': 0}
+                                for e in (0.5, 1.0)]}, fh)
+        out = self.cli('uval', '--uval-replicates', '2', root=root)
+        self.assertEqual(out.count('no-defence IGR'), 4)
+        cached = sorted(os.listdir(os.path.join(self.results, root, 'utility_val', 'Fire_OUE')))
+        self.assertEqual(cached, ['eps0.5_b0.1_r10_s4_rep2000.npz', 'eps0.5_b0.1_r10_s4_rep2001.npz',
+                                  'eps1_b0.1_r10_s4_rep2000.npz', 'eps1_b0.1_r10_s4_rep2001.npz'])
+        self.assertEqual(self.cli('uval', '--uval-replicates', '2', root=root).count('(done)'), 4)
+        self.cli('uselect', root=root)
+        ut_rec = rb.load_threshold(d, 'threshold_utility.json')
+        self.assertEqual(ut_rec['validation_runs'], 4)
+        self.assertLessEqual(ut_rec['validation_mean_igr2'], ut_rec['reference']['no_defense']['mean_igr2'] + 1e-12)
+        self.assertLessEqual(ut_rec['validation_mean_igr2'],
+                             ut_rec['reference']['at_f1_threshold']['mean_igr2'] + 1e-12)
+        # held-out runs are scored again so both thresholds sit on the same users
+        out = self.cli('run', '--baselines', root=root)
+        self.assertNotIn('(done)', out)
+        r = pd.read_csv(f, keep_default_na=False)
+        ours = r[r.detector == 'ours_in_dist'].set_index('variant')
+        self.assertEqual(sorted(ours.index), ['frozen', 'frozen_utility'])
+        self.assertAlmostEqual(float(ours.loc['frozen_utility', 'threshold']), ut_rec['threshold'])
+        self.assertAlmostEqual(float(ours.loc['frozen', 'threshold']), 0.25)
 
     def test_pipeline(self):
         import pandas as pd
