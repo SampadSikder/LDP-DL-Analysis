@@ -349,11 +349,14 @@ def cmd_run(args):
             failed += 1
             say(f'{desc}  FAILED: {e}\n{traceback.format_exc()}')
             continue
+        finally:
+            if device.type == 'cuda':   # many shards share a GPU: hand cached blocks back after every run
+                torch.cuda.empty_cache()
         if res is None:
             say(f'{desc}  (done)')
             continue
         rows, t_sim, t_feat = res
-        parts = '  '.join(f"{r['detector']}{'/prior' if r['variant'] == 'prior' else ''}: "
+        parts = '  '.join(f"{r['detector']}{'/' + r['variant'] if r['variant'] in ('prior', 'frozen_utility') else ''}: "
                           f"F1={r['f1']:.3f} IGR={r['igr']:+.3f}" for r in rows)
         say(f'{desc}  sim {t_sim:.0f}s feats {t_feat:.0f}s total {time.time() - t0:.0f}s\n    {parts}')
     say(f'shard {args.shard} finished; {failed} failed')

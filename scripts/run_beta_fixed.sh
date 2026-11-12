@@ -40,7 +40,7 @@
 #
 # Env: PY, JOBS (parallel trainings / evaluations, default 6), GPUS (default: all, e.g. "0 1 2"),
 #      SHARDS (simulation processes, default 16), PROC (threads each, default 4), UVAL_REPS (default 1),
-#      IGR_CACHE (all|none, default all), ROOTS (subset of the four, space-separated), SKIP_TESTS=1.
+#      IGR_CACHE (all|none, default all), IGR_GPU (GPUs for IGR scoring, default: GPUS), ROOTS (subset of the four, space-separated), SKIP_TESTS=1.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -164,6 +164,7 @@ stage_igr () {
   done
   say "igr: frozen-threshold models + no defence + perfect removal + Diffstats on re-simulated held-out runs"
   PY=$PY ROOTS="${ROOTS[*]}" BASELINES=diffstats SHARDS=$SHARDS PROC=$PROC SKIP_TESTS=1 IGR_ARGS="--cache $IGR_CACHE" \
+  IGR_GPU="${IGR_GPU-${GPU_LIST[*]}}" \
     bash scripts/igr/run_igr_server.sh plan run collect
 }
 

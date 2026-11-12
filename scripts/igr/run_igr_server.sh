@@ -22,8 +22,8 @@
 #   figures  scripts/igr/igr_figures.py -> results/figures/frequency_oracle/igr/
 #   pack     results/igr_results.tar.gz (CSVs, designs, figures; no caches) to copy to your machine
 #
-# Env overrides: PY, SHARDS (default 8), PROC (default 4), IGR_GPU (GPU for our model's forward pass,
-#   default 0; empty = CPU), ROOTS (space-separated results roots, default the five *_v3f roots),
+# Env overrides: PY, SHARDS (default 8), PROC (default 4), IGR_GPU (GPU(s) for our model's forward pass,
+#   space-separated, shards spread round-robin, e.g. "0 1 2"; default 0; empty = CPU), ROOTS (space-separated results roots, default the five *_v3f roots),
 #   REPLICATES (runs per config; default the datasets' held-out count, 1), IGR_ARGS (extra run_igr.py args),
 #   BASELINES (baselines scored next to ours, default "fiad diffstats"; BASELINES=diffstats skips FIAD,
 #   which takes most of the run time; BASELINES= scores ours only; a later run that asks for a baseline
@@ -80,10 +80,12 @@ stage_norms () {
 
 stage_run () {
   local free; free=$(free -g | awk '/^Mem:/{print $7}')
-  say "run: $SHARDS shards x $PROC threads, GPU '${IGR_GPU:-cpu}', ${free} GB RAM available now"
+  local gpus=($IGR_GPU)          # shards are spread round-robin over the listed GPUs
+  say "run: $SHARDS shards x $PROC threads, GPU(s) '${IGR_GPU:-cpu}', ${free} GB RAM available now"
   local pids=() i
   for (( i = 0; i < SHARDS; i++ )); do
-    CUDA_VISIBLE_DEVICES=$IGR_GPU nohup "$PY" scripts/igr/run_igr.py run --shard "$i" --num-shards "$SHARDS" \
+    CUDA_VISIBLE_DEVICES=${gpus[$(( i % (${#gpus[@]} > 0 ? ${#gpus[@]} : 1) ))]:-} \
+      nohup "$PY" scripts/igr/run_igr.py run --shard "$i" --num-shards "$SHARDS" \
       --processors "$PROC" ${ARGS[@]+"${ARGS[@]}"} > "$LOGS/run_shard$i.log" 2>&1 &
     pids+=($!)
   done
@@ -98,7 +100,7 @@ stage_run () {
 
 stage_wsp () {
   say "wsp: WSP models on the cached runs"
-  CUDA_VISIBLE_DEVICES=$IGR_GPU "$PY" scripts/igr/run_igr.py wsp --processors "$PROC" 2>&1 | tee "$LOGS/wsp.log" | tail -25
+  CUDA_VISIBLE_DEVICES=${IGR_GPU%% *} "$PY" scripts/igr/run_igr.py wsp --processors "$PROC" 2>&1 | tee "$LOGS/wsp.log" | tail -25
 }
 
 stage_collect () { igr collect; }
