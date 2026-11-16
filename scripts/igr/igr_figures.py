@@ -17,8 +17,9 @@ beta_train is the design's default attacker share (the share known when training
 
 Reading IGR: 1/r = the baseline attack's level (fake users who just report a target honestly);
 0 = the attack's gain on the targets is gone; below 0 = genuine supporters of the targets were removed
-too. The y axis is symlog (linear inside +-1/r) because an undefended attack reaches IGR >> 1 at small
-epsilon.
+too. The IGR axis is linear and symmetric about 0 (-IGR_LIM .. +IGR_LIM, default 3; --igr-lim), the same on
+every figure, so distances above and below 0 compare directly. A point beyond the range is drawn at the
+edge as a triangle pointing out of the panel; its value is in tables/.
 """
 import argparse
 import glob
@@ -32,11 +33,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter, NullLocator  # noqa: E402
+from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 RESULTS = os.environ.get('IGR_RESULTS') or os.path.join(ROOT, 'results')
 OUT = os.environ.get('IGR_FIG_DIR') or os.path.join(RESULTS, 'figures', 'frequency_oracle', 'igr')
+RUNS_NAME = 'igr_runs.csv'      # --runs-name: another table of the same layout in results/<root>/igr/
+IGR_LIM = 3.0                   # IGR axes run from -IGR_LIM to +IGR_LIM (--igr-lim)
 
 # Same validated slots as scripts/plots/style.py (blue, orange, aqua, violet; all-pairs on the light
 # surface: normal-vision dE >= 16.3, CVD dE >= 9.2). Reference series are grays with their own line
@@ -89,7 +92,7 @@ def apply_style():
 
 
 def load(root):
-    p = os.path.join(RESULTS, root, 'igr', 'igr_runs.csv')
+    p = os.path.join(RESULTS, root, 'igr', RUNS_NAME)
     if not os.path.exists(p):
         return None, {}
     df = pd.read_csv(p, keep_default_na=False, na_values=[''])
@@ -131,28 +134,45 @@ def oat_slice(df, design, param):
     return df[m]
 
 
-def plot_series(ax, g, x, st, label=None, y='igr'):
+def plot_series(ax, g, x, st, label=None, y='igr', clip=None):
+    """Mean of `y` per `x`. clip = L keeps the line inside +-L: a point beyond it sits at the edge as a
+    triangle pointing outwards."""
     g = g.groupby(x, as_index=False)[y].mean().sort_values(x)
-    ax.plot(g[x], g[y], color=st['color'], linestyle=st['ls'], marker=st['marker'], linewidth=st['lw'],
-            markersize=st['ms'], fillstyle=st['fill'], markeredgewidth=1.1, label=label or st['label'], zorder=3)
+    kw = dict(color=st['color'], fillstyle=st['fill'], markeredgewidth=1.1, zorder=3)
+    if clip is None:
+        ax.plot(g[x], g[y], linestyle=st['ls'], marker=st['marker'], linewidth=st['lw'], markersize=st['ms'],
+                label=label or st['label'], **kw)
+        return
+    xs, v = g[x].to_numpy(), g[y].to_numpy(dtype=float)
+    edge = 0.97 * clip
+    vc = np.clip(v, -edge, edge)
+    ax.plot(xs, vc, linestyle=st['ls'], linewidth=st['lw'], marker='none', label=label or st['label'], **kw)
+    inside = np.abs(v) <= edge
+    if st['marker']:
+        ax.plot(xs[inside], vc[inside], linestyle='none', marker=st['marker'], markersize=st['ms'], **kw)
+    for sel, mk in ((v > edge, '^'), (v < -edge, 'v')):
+        if sel.any():
+            ax.plot(xs[sel], vc[sel], linestyle='none', marker=mk, markersize=max(st['ms'], 4.5) + 2,
+                    clip_on=False, **kw)
 
 
 def _plain(v, _=None):
     return '0' if v == 0 else f'{v:g}'
 
 
-def symlog_ticks(axis, lim, r):
-    """Readable ticks for a symlog IGR axis: 0, +-1/r and the decades beyond."""
-    lo, hi = lim
-    cand = [0.0, 1.0 / r, -1.0 / r] + [s * 10.0 ** k for k in range(0, 4) for s in (1, -1)]
-    axis.set_major_locator(FixedLocator(sorted(t for t in cand if lo <= t <= hi)))
-    axis.set_major_formatter(FuncFormatter(_plain))
-    axis.set_minor_locator(NullLocator())
+def igr_ticks(lim):
+    step = 1.0 if lim <= 5 else (2.0 if lim <= 10 else 5.0)
+    k = int(lim // step)
+    return [i * step for i in range(-k, k + 1)]
 
 
-def symlog_axis(ax, r):
-    ax.set_yscale('symlog', linthresh=1.0 / r, linscale=1.0)
-    ax.axhline(0, color=AXIS, linewidth=0.8, zorder=1)
+def igr_axis(ax, r, lim=None):
+    """Linear IGR y axis, symmetric about 0, with the 0 line and the baseline attack's 1/r."""
+    lim = lim or IGR_LIM
+    ax.set_ylim(-lim, lim)
+    ax.yaxis.set_major_locator(FixedLocator(igr_ticks(lim)))
+    ax.yaxis.set_major_formatter(FuncFormatter(_plain))
+    ax.axhline(0, color=AXIS, linewidth=1.0, zorder=1)
     ax.axhline(1.0 / r, color=INK2, linewidth=0.8, linestyle=(0, (4, 3)), zorder=1)
 
 
@@ -195,9 +215,10 @@ def protocol_figure(root, protocol, df, design, metric='igr'):
             s = oat_slice(d[d.dataset_type == ds], design, p)
             for k in keys:
                 if len(s[s.detector == k]):
-                    plot_series(ax, s[s.detector == k], p, SERIES[k], y=metric)
+                    plot_series(ax, s[s.detector == k], p, SERIES[k], y=metric,
+                                clip=IGR_LIM if metric == 'igr' else None)
             if metric == 'igr':
-                symlog_axis(ax, r)
+                igr_axis(ax, r)
             else:
                 ax.set_ylim(-0.03, 1.03)
             if p == 'attacker_ratio':
@@ -210,10 +231,8 @@ def protocol_figure(root, protocol, df, design, metric='igr'):
     if not one:
         for j, p in enumerate(params):
             axes[0, j].set_title(f'{datasets[0]}, vs {PARAM_LABEL[p]}', loc='left', fontsize=9.5)
-    if metric == 'igr':
-        symlog_ticks(axes[0, 0].yaxis, axes[0, 0].get_ylim(), r)
     dflt = design.get('defaults', {})
-    title = ('item gain ratio after removing the flagged users' if metric == 'igr'
+    title = (f'item gain ratio after removing the flagged users (▲/▼ = beyond ±{IGR_LIM:g})' if metric == 'igr'
              else 'F1 of the flagged users on the IGR runs (natural attacker share)')
     fig.suptitle(f'{PROTOCOL_LABEL[protocol]}: {title}',
                  x=0.01, y=0.995, ha='left', va='top', fontsize=10.5, color=INK)
@@ -260,14 +279,25 @@ def default_figure(root, t):
         for ax, col in zip(axes, ('igr', 'mse')):
             vals = [t[(t.protocol == p) & (t.dataset_type == d) & (t.detector == k)][col] for p, d in cells]
             v = np.array([x.iloc[0] if len(x) else np.nan for x in vals])
-            ax.plot(v, y + off, linestyle='none', marker=st['marker'] or 'd', color=st['color'],
-                    markersize=max(st['ms'], 5), fillstyle=st['fill'], markeredgewidth=1.2, label=st['label'], zorder=3)
+            kw = dict(linestyle='none', color=st['color'], fillstyle=st['fill'], markeredgewidth=1.2, zorder=3)
+            if col == 'mse':
+                ax.plot(v, y + off, marker=st['marker'] or 'd', markersize=max(st['ms'], 5), label=st['label'], **kw)
+                continue
+            edge = 0.97 * IGR_LIM          # IGR: linear, symmetric; beyond the range -> arrow at the edge
+            vc = np.clip(v, -edge, edge)
+            inside = ~(np.abs(v) > edge)
+            ax.plot(vc[inside], (y + off)[inside], marker=st['marker'] or 'd', markersize=max(st['ms'], 5),
+                    label=st['label'], **kw)
+            for sel, mk in ((v > edge, '>'), (v < -edge, '<')):
+                if sel.any():
+                    ax.plot(vc[sel], (y + off)[sel], marker=mk, markersize=max(st['ms'], 5) + 2, clip_on=False, **kw)
     r = 10 if t.empty or 'target_set_size' not in t else int(t['target_set_size'].iloc[0])
-    axes[0].set_xscale('symlog', linthresh=1.0 / r)
-    axes[0].axvline(0, color=AXIS, linewidth=0.8)
+    axes[0].set_xlim(-IGR_LIM, IGR_LIM)
+    axes[0].xaxis.set_major_locator(FixedLocator(igr_ticks(IGR_LIM)))
+    axes[0].xaxis.set_major_formatter(FuncFormatter(_plain))
+    axes[0].axvline(0, color=AXIS, linewidth=1.0)
     axes[0].axvline(1.0 / r, color=INK2, linewidth=0.8, linestyle=(0, (4, 3)))
-    symlog_ticks(axes[0].xaxis, axes[0].get_xlim(), r)
-    axes[0].set_xlabel('IGR (symlog; dashed = 1/r)')
+    axes[0].set_xlabel(f'IGR (dashed = 1/r; ◀/▶ = beyond ±{IGR_LIM:g})')
     axes[1].set_xscale('log')
     lo, hi = axes[1].get_xlim()
     axes[1].xaxis.set_major_locator(FixedLocator(np.geomspace(lo, hi, 5)[1:-1]))
@@ -307,7 +337,7 @@ def wsp_figure(df, root):
             if g.empty:
                 continue
             present.add(k)
-            plot_series(ax, g, 'epsilon', st)
+            plot_series(ax, g, 'epsilon', st, clip=IGR_LIM)
             a = g.groupby('epsilon', as_index=False).agg(igr=('igr', 'mean'), igr_sd=('igr', 'std'), mse=('mse', 'mean'),
                                                          f1=('f1', 'mean'), runs=('igr', 'size'))
             a.insert(0, 'series', k)
@@ -315,12 +345,11 @@ def wsp_figure(df, root):
             a.insert(0, 'dataset_type', ds)
             a.insert(0, 'protocol', protocol)
             table.append(a)
-        symlog_axis(ax, int(cell.target_set_size.iloc[0]))
+        igr_axis(ax, int(cell.target_set_size.iloc[0]))
         ax.set_title(f"{PROTOCOL_LABEL[protocol]} · {ds} · {'cross' if det == 'ours_cross' else 'in-dist'}",
                      loc='left', fontsize=9.5)
         ax.set_xlabel(PARAM_LABEL['epsilon'])
     axes[0, 0].set_ylabel('IGR')
-    symlog_ticks(axes[0, 0].yaxis, axes[0, 0].get_ylim(), int(df.target_set_size.iloc[0]))
     fig.suptitle(f'{root}: IGR of the WSP runs (lines = mean over seeds)', x=0.01, ha='left', fontsize=10.5)
     fig.legend(handles=legend_handles(WSP_SERIES, [k for k in WSP_SERIES if k in present]), loc='lower center',
                ncol=4, fontsize=8.5)
@@ -332,15 +361,20 @@ def wsp_figure(df, root):
 
 
 def main():
+    global OUT, IGR_LIM, RUNS_NAME
     ap = argparse.ArgumentParser()
     ap.add_argument('--roots', nargs='+')
     ap.add_argument('--out', help='figure folder (default results/figures/frequency_oracle/igr)')
+    ap.add_argument('--igr-lim', type=float, default=IGR_LIM,
+                    help='IGR axes run from -LIM to +LIM (default %(default)s); points beyond sit at the edge')
+    ap.add_argument('--runs-name', default=RUNS_NAME,
+                    help='table in results/<root>/igr/ to draw (default %(default)s; e.g. igr_runs_f1threshold.csv)')
     args = ap.parse_args()
+    IGR_LIM, RUNS_NAME = args.igr_lim, args.runs_name
     if args.out:
-        global OUT
         OUT = args.out
     roots = args.roots or sorted(os.path.basename(os.path.dirname(os.path.dirname(p)))
-                                 for p in glob.glob(os.path.join(RESULTS, '*', 'igr', 'igr_runs.csv')))
+                                 for p in glob.glob(os.path.join(RESULTS, '*', 'igr', RUNS_NAME)))
     if not roots:
         print(f'no results/*/igr/igr_runs.csv under {RESULTS}; run scripts/igr/run_igr.py collect first')
         return 1

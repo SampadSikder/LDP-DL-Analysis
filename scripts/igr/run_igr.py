@@ -332,6 +332,11 @@ def cmd_run(args):
     models = Models(device)
     cache_cells = set() if args.cache == 'none' else wsp_cells()
     runs = plan(args)
+    empty = [r for r in args.roots if not any(run['root'] == r for run in runs)]
+    if empty:      # e.g. the root's output/<data root>/<PROTOCOL>/design.json is gone: not "nothing left to do"
+        say(f'no runs planned for {", ".join(empty)} -- see the [WARN] lines above (missing results folder or '
+            f'dataset design.json; --data-map ROOT=DIR points a root at another data folder)')
+        return 1
     if args.cache == 'all':
         cache_cells = {(r['root'], igr.cell_name(r['dataset_type'], r['protocol'])) for r in runs}
     mine = runs[args.shard::args.num_shards]

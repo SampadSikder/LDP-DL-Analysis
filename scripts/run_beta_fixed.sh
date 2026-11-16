@@ -12,6 +12,12 @@
 #   oat_apa_n500k_bfix         <- output/oat_apa_n500k           0.05  (APA main sweep; test beta 0.01-0.20)
 #   oat_b010_mga-a_n500k_bfix  <- output/oat_b010_mga-a_n500k    0.10
 #   oat_b015_mga-a_n500k_bfix  <- output/oat_b015_mga-a_n500k    0.15
+# Not in the default ROOTS (name them: ROOTS="oat_b010_apa_n500k_bfix oat_b015_apa_n500k_bfix ..."):
+#   oat_b010_apa_n500k_bfix    <- output/oat_b010_apa_n500k      0.10  (APA, eps 0.1-3)
+#   oat_b015_apa_n500k_bfix    <- output/oat_b015_apa_n500k      0.15  (APA, eps 0.1-3)
+#   oat_higheps_apa_n500k_bfix <- output/oat_higheps_apa_n500k   0.05  (APA, eps 1-3)
+#   oat_higheps_mga-a_n500k_bfix <- output/oat_higheps_mga-a_n500k 0.05 (MGA-A, eps 1-3)
+#   nohup env ROOTS="..." GPUS=2 bash scripts/run_beta_fixed.sh full > /dev/null 2>&1 &
 # Every protocol found under the data root, every dataset, in-distribution and cross-dataset (train on the
 # other two). Nothing existing is overwritten: new validation runs go to output/<data root>_val/, models and
 # results to results/<root>_bfix/, logs to results/beta_fixed_logs/.
@@ -19,7 +25,8 @@
 # Utility-selected thresholds for the trained models (no retraining; attacker_detector/utility_threshold.py):
 #   nohup bash scripts/run_beta_fixed.sh utility > /dev/null 2>&1 &      # = check uval uselect ueval igr pack
 #
-# Stages (`all` = check val train igr pack; `utility` = check uval uselect ueval igr pack):
+# Stages (`all` = check val train igr pack; `utility` = check uval uselect ueval igr pack;
+#         `full` = check val train baselines uval uselect ueval igr pack -- a new root, start to finish):
 #   check  unit tests of the variant and of IGR (CPU, a few minutes)
 #   val    generate the validation source runs: one new complete run (n = 500,000) per eligible config,
 #          at the source beta, replicate indices from 1000 on (no seed shared with the main dataset)
@@ -28,6 +35,10 @@
 #   igr    IGR (and F1) of every model on re-simulated held-out runs at its frozen threshold, plus no
 #          defence, perfect removal and Diffstats (scripts/igr/run_igr_server.sh run collect)
 #   pack   results/beta_fixed_results.tar.gz: CSVs, thresholds, manifests, checkpoints (no predictions)
+#   baselines  F1 of FIAD and Diffstats on the held-out runs (main.py --baseline, CPU only; FIAD is slow) ->
+#          results/<root>/baselines/<Dataset>_<PROTOCOL>/{fiad,diffstats}/, the curves of the F1 figures.
+#          BASE_JOBS cells at a time (default 4), BASE_PROC threads each (default 8); BASELINE_METHODS
+#          (default "fiad diffstats"). Finished cells are skipped, an interrupted one resumes.
 #   uval     utility-validation runs: UVAL_REPS new complete runs per eligible config at the source beta
 #            (replicates 2000+), stored compactly in results/<root>/utility_val/ (scripts/igr/run_igr.py uval)
 #   uselect  per model: the threshold with the lowest mean IGR^2 on its utility-validation runs (source
@@ -40,7 +51,7 @@
 #
 # Env: PY, JOBS (parallel trainings / evaluations, default 6), GPUS (default: all, e.g. "0 1 2"),
 #      SHARDS (simulation processes, default 16), PROC (threads each, default 4), UVAL_REPS (default 1),
-#      IGR_CACHE (all|none, default all), IGR_GPU (GPUs for IGR scoring, default: GPUS), ROOTS (subset of the four, space-separated), SKIP_TESTS=1.
+#      IGR_CACHE (all|none, default all), IGR_GPU (GPUs for IGR scoring, default: GPUS), ROOTS (space-separated; default the first four of the matrix), SKIP_TESTS=1.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -62,7 +73,16 @@ declare -A DATA=( [oat_v3_n500k_bfix]=output/oat_v3_n500k [oat_apa_n500k_bfix]=o
                   [oat_b015_mga-a_n500k_bfix]=output/oat_b015_mga-a_n500k )
 declare -A BETA=( [oat_v3_n500k_bfix]=0.05 [oat_apa_n500k_bfix]=0.05
                   [oat_b010_mga-a_n500k_bfix]=0.10 [oat_b015_mga-a_n500k_bfix]=0.15 )
+# further roots, run only when named in ROOTS
+DATA+=( [oat_b010_apa_n500k_bfix]=output/oat_b010_apa_n500k [oat_b015_apa_n500k_bfix]=output/oat_b015_apa_n500k
+        [oat_higheps_apa_n500k_bfix]=output/oat_higheps_apa_n500k
+        [oat_higheps_mga-a_n500k_bfix]=output/oat_higheps_mga-a_n500k )
+BETA+=( [oat_b010_apa_n500k_bfix]=0.10 [oat_b015_apa_n500k_bfix]=0.15
+        [oat_higheps_apa_n500k_bfix]=0.05 [oat_higheps_mga-a_n500k_bfix]=0.05 )
 ROOTS=(${ROOTS:-oat_v3_n500k_bfix oat_apa_n500k_bfix oat_b010_mga-a_n500k_bfix oat_b015_mga-a_n500k_bfix})
+for root in "${ROOTS[@]}"; do
+  [[ -n ${DATA[$root]:-} ]] || { echo "unknown root: $root (known: ${!DATA[*]})"; exit 1; }
+done
 DATASETS=(zipf emoji fire)
 if [[ -z ${GPUS:-} ]]; then
   GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | tr '\n' ' ')
@@ -154,6 +174,38 @@ stage_train () {
   return $bad
 }
 
+baseline_one () {   # $1 = data dir of one protocol, $2 = dataset, $3 = output dir, $4 = log
+  local m have=1
+  for m in $BASELINE_METHODS; do [[ -f $3/$m/sensitivity_test_results.csv ]] || have=0; done
+  (( have )) && { echo "  skip $3"; return 0; }
+  echo "  [$(date '+%T')] baselines $3"
+  # shellcheck disable=SC2086
+  "$PY" main.py -d "$1" --protocol "$(basename "$1")" --dataset "$2" --baseline $BASELINE_METHODS \
+      --baseline-processors "$BASE_PROC" -o "$3" > "$4" 2>&1 || { echo "  FAILED $3 -- see $4"; return 1; }
+  grep -A2 "sensitivity (" "$4" | grep overall | sed "s|^|    $(basename "$3"): |" | cut -c1-200
+  return 0
+}
+
+stage_baselines () {
+  local root data P D bad=0 n=0
+  BASELINE_METHODS=${BASELINE_METHODS:-fiad diffstats}; BASE_JOBS=${BASE_JOBS:-4}; BASE_PROC=${BASE_PROC:-8}
+  say "baselines: $BASELINE_METHODS F1 on the held-out runs, $BASE_JOBS cells x $BASE_PROC threads (CPU)"
+  for root in "${ROOTS[@]}"; do
+    data=${DATA[$root]}
+    for P in $(protocols_of "$data"); do
+      for D in "${DATASETS[@]}"; do
+        while (( $(jobs -rp | wc -l) >= BASE_JOBS )); do wait -n || bad=1; done
+        baseline_one "$data/$P" "$D" "results/$root/baselines/${D^}_$P" "$LOGS/baselines_${root}_${D^}_$P.log" &
+        n=$(( n + 1 ))
+      done
+    done
+  done
+  while (( $(jobs -rp | wc -l) > 0 )); do wait -n || bad=1; done
+  say "baselines: $n cells"
+  (( bad )) && say "baselines: some cells FAILED -- rerun 'baselines' to retry them"
+  return $bad
+}
+
 stage_igr () {
   local root
   for root in "${ROOTS[@]}"; do      # keep the F1-threshold-only IGR table before runs are scored again
@@ -232,11 +284,22 @@ stage_pack () {
 }
 
 STAGES=("$@")
-(( ${#STAGES[@]} )) || { sed -n '2,48p' "$0"; exit 1; }
+(( ${#STAGES[@]} )) || { sed -n '2,60p' "$0"; exit 1; }
 [[ ${STAGES[*]} == all ]] && STAGES=(check val train igr pack)
 [[ ${STAGES[*]} == utility ]] && STAGES=(check uval uselect ueval igr pack)
+[[ ${STAGES[*]} == full ]] && STAGES=(check val train baselines uval uselect ueval igr pack)
 for s in "${STAGES[@]}"; do
-  case $s in check|val|train|igr|pack|uval|uselect|ueval) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
+  case $s in check|val|train|baselines|igr|pack|uval|uselect|ueval) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
+done
+for s in "${STAGES[@]}"; do     # stages that read the dataset: a missing folder used to pass silently
+  case $s in val|train|baselines|uval|igr)
+    for root in "${ROOTS[@]}"; do
+      ls "${DATA[$root]}"/*/design.json > /dev/null 2>&1 || {
+        echo "$root: no ${DATA[$root]}/<PROTOCOL>/design.json here, stage '$s' needs the dataset"
+        echo "  (IGR only: scripts/igr/run_igr_server.sh with --data-map and the design copies in results/$root/igr/)"
+        exit 1; }
+    done ;;
+  esac
 done
 say "=== run_beta_fixed.sh ${STAGES[*]}  (PY=$PY, roots: ${ROOTS[*]})"
 for s in "${STAGES[@]}"; do
