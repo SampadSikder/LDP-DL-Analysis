@@ -272,6 +272,49 @@ def _sample_config(frame, quota, rng, what, cfg):
     return np.concatenate(out)
 
 
+def sample_development_rows(opt_f, val_f, train_samples, val_size, seed):
+    """Optimization and validation rows of the reference-beta design, drawn config by config.
+
+    opt_f / val_f: one row per user of the eligible optimization / validation runs, with the _KEY
+    columns, 'run', 'y' (1 = attacker) and 'idx' (the user's row in its own feature array).
+    Every config supplies the same number of attackers and of genuine users (the budget split as
+    evenly as integers allow). Returns (optimization idx, validation idx, per-config records).
+    build_split and attacker_detector/threshold_scaling_study.py share this, so both draw rows the
+    same way from the same seed."""
+    configs = sorted(map(tuple, opt_f[_KEY].drop_duplicates().to_numpy().tolist()))
+    val_configs = sorted(map(tuple, val_f[_KEY].drop_duplicates().to_numpy().tolist()))
+    if configs != val_configs:
+        missing = sorted(set(configs) - set(val_configs))
+        extra = sorted(set(val_configs) - set(configs))
+        raise ValueError(f'--val-data does not cover the eligible configs: missing {missing}, '
+                         f'not in the training data {extra}')
+
+    val_total = int(round(train_samples * val_size))
+    opt_total = train_samples - val_total
+    if opt_total % 2 or val_total % 2:
+        raise ValueError(f'optimization ({opt_total}) and validation ({val_total}) budgets must be even')
+    k = len(configs)
+    opt_quota = allocate_evenly(opt_total // 2, k)
+    val_quota = allocate_evenly(val_total // 2, k)
+
+    rng_opt, rng_val = (np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(2))
+    opt_by_cfg = {c: g for c, g in opt_f.groupby(_KEY, sort=True)}
+    val_by_cfg = {c: g for c, g in val_f.groupby(_KEY, sort=True)}
+    tr_parts, va_parts, cfg_rows = [], [], []
+    for c, q_opt, q_val in zip(configs, opt_quota, val_quota):
+        tr_parts.append(_sample_config(opt_by_cfg[c], q_opt, rng_opt, 'optimization', c))
+        va_parts.append(_sample_config(val_by_cfg[c], q_val, rng_val, 'validation', c))
+        cfg_rows.append({
+            **dict(zip(_KEY, c)), 'source_beta': float(c[3]),
+            'optimization_rows_per_class': q_opt, 'validation_rows_per_class': q_val,
+            'optimization_runs': _runs_of(opt_by_cfg[c])[['run', 'rows', 'attackers']].to_dict('records'),
+            'validation_runs': _runs_of(val_by_cfg[c])[['run', 'rows', 'attackers']].to_dict('records'),
+        })
+    tr_idx = rng_opt.permutation(np.concatenate(tr_parts))
+    va_idx = rng_val.permutation(np.concatenate(va_parts))
+    return tr_idx, va_idx, cfg_rows
+
+
 def build_split(ds, ds_val, *, source_beta, train_datasets, test_dataset, train_samples=500_000,
                 val_size=0.1, test_samples=60_000, seed=42):
     """Optimization / validation / test rows of the reference-beta design.
@@ -311,37 +354,8 @@ def build_split(ds, ds_val, *, source_beta, train_datasets, test_dataset, train_
         raise ValueError(f'--val-data has no runs for datasets {train_datasets}')
 
     opt_f, val_f = _frame(ds, pool), _frame(ds_val, val_pool)
-    configs = sorted(map(tuple, opt_f[_KEY].drop_duplicates().to_numpy().tolist()))
-    val_configs = sorted(map(tuple, val_f[_KEY].drop_duplicates().to_numpy().tolist()))
-    if configs != val_configs:
-        missing = sorted(set(configs) - set(val_configs))
-        extra = sorted(set(val_configs) - set(configs))
-        raise ValueError(f'--val-data does not cover the eligible configs: missing {missing}, '
-                         f'not in the training data {extra}')
-
-    val_total = int(round(train_samples * val_size))
-    opt_total = train_samples - val_total
-    if opt_total % 2 or val_total % 2:
-        raise ValueError(f'optimization ({opt_total}) and validation ({val_total}) budgets must be even')
-    k = len(configs)
-    opt_quota = allocate_evenly(opt_total // 2, k)
-    val_quota = allocate_evenly(val_total // 2, k)
-
-    rng_opt, rng_val = (np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(2))
-    opt_by_cfg = {c: g for c, g in opt_f.groupby(_KEY, sort=True)}
-    val_by_cfg = {c: g for c, g in val_f.groupby(_KEY, sort=True)}
-    tr_parts, va_parts, cfg_rows = [], [], []
-    for c, q_opt, q_val in zip(configs, opt_quota, val_quota):
-        tr_parts.append(_sample_config(opt_by_cfg[c], q_opt, rng_opt, 'optimization', c))
-        va_parts.append(_sample_config(val_by_cfg[c], q_val, rng_val, 'validation', c))
-        cfg_rows.append({
-            **dict(zip(_KEY, c)), 'source_beta': float(c[3]),
-            'optimization_rows_per_class': q_opt, 'validation_rows_per_class': q_val,
-            'optimization_runs': _runs_of(opt_by_cfg[c])[['run', 'rows', 'attackers']].to_dict('records'),
-            'validation_runs': _runs_of(val_by_cfg[c])[['run', 'rows', 'attackers']].to_dict('records'),
-        })
-    tr_idx = rng_opt.permutation(np.concatenate(tr_parts))
-    va_idx = rng_val.permutation(np.concatenate(va_parts))
+    tr_idx, va_idx, cfg_rows = sample_development_rows(opt_f, val_f, train_samples, val_size, seed)
+    k = len(cfg_rows)
 
     # ---- held-out test: the same rows the standard run takes (same call, same seed)
     held_groups = _config_groups(ds, held)

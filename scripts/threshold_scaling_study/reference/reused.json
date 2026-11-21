@@ -1,0 +1,264 @@
+{
+ "_note": "sha256 of the checkpoints the threshold and scaling study reuses, the pooled models' global z-score and the designs, copied from the local results (2026-11-20). init verifies the server files against this.",
+ "oat_v3_n500k": {
+  "checkpoints": {
+   "pooled/in_dist/Zipf_OUE": "0327265277ad0b9adfed13d4f0e560b40d4ce72d006a8d0a5d6300986a86b643",
+   "fixed_beta/in_dist/Zipf_OUE": "987ae6bbcc541951bb6cfcaa2e20718a28bd5ffeb0973752d1d4fe6111c5d7b2",
+   "pooled/cross/OUE_Zipf_test": "5f811c41bcc4264e99f431233b514743752dc857eaa03715a80bbbd982bebaf0",
+   "fixed_beta/cross/OUE_Zipf_test": "e33c7d9dd1730d64e0fd3f392fe688d15159d0cad2d0401f2e7d4f4b1b74f519",
+   "pooled/in_dist/Emoji_OUE": "5d5b98e97416187498b9f28381e3a1464da33a97e08819976496e08d2e9d7ad7",
+   "fixed_beta/in_dist/Emoji_OUE": "9b843fc3290b279b8732f7adec468d64c73117934b42dbb6ded8bf6e26e19bd4",
+   "pooled/cross/OUE_Emoji_test": "79af7f48dc218f697b0c6082f690ff87d7309b8115318cfb95486ff0fa20d489",
+   "fixed_beta/cross/OUE_Emoji_test": "b8b38de0b3e990da52590f717e76a6f14d760237689f1e1aa8ecaa0a61027e03",
+   "pooled/in_dist/Fire_OUE": "868204bc21442904625e55cdc7d68e59865ea3213c01739e1fee76892c0ebe8c",
+   "fixed_beta/in_dist/Fire_OUE": "0d9b31c541664a305c4c397df01bbdb098403831e9881f77afb5dc132be390d5",
+   "pooled/cross/OUE_Fire_test": "173057e724861e873f200c947379d81b3a9d2cf7275e3dda5b77c164079792bd",
+   "fixed_beta/cross/OUE_Fire_test": "e14fbf94b1db1f26e3ab91b9cd5b38ac88e7376811db4d1e0b45f73af7a7daa9",
+   "pooled/in_dist/Zipf_HST_User": "02673a2dcd8ec79dbc607378bd470b255206f141fabaf61e871b1fef396831d2",
+   "fixed_beta/in_dist/Zipf_HST_User": "2881ca08a8b0dd4a5c1379bae32f7cd7e5890ce015a1655c7d48429e94accbc0",
+   "pooled/cross/HST_User_Zipf_test": "c684fbbdfefbaf648f56d7476ce00efe9e27932098d2000051991144a54d1c92",
+   "fixed_beta/cross/HST_User_Zipf_test": "ecebe0bcb900b45f1ed8d763a96b652102f3404d21813ef2f2e7ddc8715ff909",
+   "pooled/in_dist/Emoji_HST_User": "d5988d3c46165c8593d6a28bd9d5c387449389a949bdcbacafa716a1e5bf4980",
+   "fixed_beta/in_dist/Emoji_HST_User": "3703a4984e57650dec52f1171e2080cbad3aa2945c2d0b2cb5d14417cf21d0dd",
+   "pooled/cross/HST_User_Emoji_test": "a15ea3a19db7cede97ddc7fcdd455b46a7f23578c4cc9ba3e01025e39a47dc10",
+   "fixed_beta/cross/HST_User_Emoji_test": "b35d52793a2d748cd2287edc937d33578a9242f2c7a83d751b80f7e08fe6089a",
+   "pooled/in_dist/Fire_HST_User": "8a191ccee3a0b73f5bb06969daed701cff42393967d7451adfb5b62e6c9059c3",
+   "fixed_beta/in_dist/Fire_HST_User": "863ae55b0b31d6792ac79767b08ec2554ea2236070d1df259f3ba12a9e90d24f",
+   "pooled/cross/HST_User_Fire_test": "f7eab7cfb062730ff68dfac5a3960ebf6da0bb141d9fe628246b38da19b733ba",
+   "fixed_beta/cross/HST_User_Fire_test": "6d1ec2f291c8d1f861df3eb170840f7fb036db5317269f1998990e499567cca7",
+   "pooled/in_dist/Zipf_OLH_Server": "1579741556f37cf89508c90d3fc82dd190878ed3c885ccea756c191f3d5b3010",
+   "fixed_beta/in_dist/Zipf_OLH_Server": "40329598f7f9d7fdda352cc0b40f7fd026a07001d570368b34d5d4da2418ab23",
+   "pooled/cross/OLH_Server_Zipf_test": "63d0640f4609cefdfc19ae6b9fc8bcdaf6d289aacb2245fae0ef19b5729a6fcb",
+   "fixed_beta/cross/OLH_Server_Zipf_test": "cd9a37902af44d025b9b17fd808221a9e9e003ef28843eb43a73a101801b6f81",
+   "pooled/in_dist/Emoji_OLH_Server": "a14850017204e08f3149e9609f8309a82c065ec82ee8d39f34808bc9a47f144c",
+   "fixed_beta/in_dist/Emoji_OLH_Server": "2e80e2c8d6e2643c4c8a14c3861b1db57ca93d9eaeab92f82b23775688717e58",
+   "pooled/cross/OLH_Server_Emoji_test": "70fa9fcbda3a354b84a78cabe93001693271b608a22e29e365fda7f4b7f6d37c",
+   "fixed_beta/cross/OLH_Server_Emoji_test": "7908ecbf6d3ea592de6ba9e7d91a861819e5138add12d26aa6e109a44c2fe057",
+   "pooled/in_dist/Fire_OLH_Server": "0328e0b047e9e33e51e6d26fa84041925a60911d72b6e392368da38dbcefc2a9",
+   "fixed_beta/in_dist/Fire_OLH_Server": "db6e9f53de6c5c9e377a1cf0f21e8dcc7669e062ca5e3955087c1fced1b8a176",
+   "pooled/cross/OLH_Server_Fire_test": "38c7d718cbc33f9e62c10ad813c9f34ab2a0325639edc4817b6e9079e9d031e9",
+   "fixed_beta/cross/OLH_Server_Fire_test": "6ec54115f4799d1314e886800f943b05473d6dda5d62f2bbfe0c1d575066ad75",
+   "pooled/in_dist/Zipf_HST_Server": "c087b6db8e36392c4a6c46b37ecd324a8991e18b41973f45ae144248dc3e4db9",
+   "fixed_beta/in_dist/Zipf_HST_Server": "03f0b4fa48561b669915b5223151a48999b0f346f00a8ac4c8ea96e69c991449",
+   "pooled/cross/HST_Server_Zipf_test": "5457e9320bf91fb6a7afcc496376a899bf07cb86b6f99d2417559f9d97091c58",
+   "fixed_beta/cross/HST_Server_Zipf_test": "c41fe7653e734fb141e46e46a663a0ac8cae5922002cd8738e6139de2e8675e2",
+   "pooled/in_dist/Emoji_HST_Server": "de8b5c5255ff675f7f5047f2d14f8e91b651f88a24fdff2201effa42dc67fdae",
+   "fixed_beta/in_dist/Emoji_HST_Server": "47a75188cb3e2bd2253ef9ac64d885565c7a3b3b7b00ed9ee32622cdd85d6c51",
+   "pooled/cross/HST_Server_Emoji_test": "0f3da19edef2beaf50102285b038d32d04ac727bfcc81e98ede1e5113ffb4db1",
+   "fixed_beta/cross/HST_Server_Emoji_test": "18fd5bd1284399215054653a83549145d549124aa11dff195d40edaaa3667275",
+   "pooled/in_dist/Fire_HST_Server": "d3742bd601d0115aeafafe6d20040bded59b79626119e6c627a289a03e3b3df6",
+   "fixed_beta/in_dist/Fire_HST_Server": "cbd52d41f4f18707d12a9b71d1b0284c6108dae870b2d0fc50eb5d578e02dc61",
+   "pooled/cross/HST_Server_Fire_test": "e73f6e3a91a6d89e97ba7251949a57ba9596af17bd0610861e7b31f3e74f42e7",
+   "fixed_beta/cross/HST_Server_Fire_test": "7a179357dfb10319d264c55ce28c99d2db2163579e042c7ff1928b3f5ae6f435"
+  },
+  "v3_norm": {
+   "OUE": {
+    "mean": [
+     0.013902380161705965,
+     0.0033579629760451092,
+     0.15189361598114923,
+     0.005687017071781636
+    ],
+    "std": [
+     0.7553303270193125,
+     0.7678452865696206,
+     0.7109933606980074,
+     0.027732597671553883
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   },
+   "HST_User": {
+    "mean": [
+     0.022696158276416682,
+     0.041946517483762324,
+     0.15894938521175367,
+     0.005653975624870718
+    ],
+    "std": [
+     0.7419758638853874,
+     0.7628369179199129,
+     0.701233440806644,
+     0.02758371264354262
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   },
+   "OLH_Server": {
+    "mean": [
+     0.0011204415046733125,
+     0.04534021187812004,
+     0.14451012275289776,
+     -1.7410368147198037e-05
+    ],
+    "std": [
+     0.728590447358874,
+     0.7008376467534568,
+     0.71702027762543,
+     0.0002571897956500932
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   },
+   "HST_Server": {
+    "mean": [
+     0.004040336086290031,
+     -0.006550397472325168,
+     0.13682565678002118,
+     -9.430803020264388e-07
+    ],
+    "std": [
+     0.7103522247445574,
+     0.6953377848489052,
+     0.7378895438641501,
+     0.00020666972998630102
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   }
+  },
+  "design_sha256": {
+   "OUE": "944e1e3a0f92ade9c18ef24ceff2ef5d2c1d0eab95dd772a444123f3698da95f",
+   "HST_User": "83ebda9b4b74ccc156ac9b82988cdcf7cde4eba6620d78e48af480d8e29476bd",
+   "OLH_Server": "626063faa524692de3a8927253c22c9bfabadb8eb5dd5c95146f0d7b87ad13c3",
+   "HST_Server": "739d1567b1d8c40e305f6071a1f0f899ca70315f613afa2d4b52f4f184b45aa0"
+  }
+ },
+ "oat_apa_n500k": {
+  "checkpoints": {
+   "pooled/in_dist/Zipf_OUE": "11f7efd8eac570e143553fb309c39ae18ac15adee03138dd0fca9665d2fdc532",
+   "fixed_beta/in_dist/Zipf_OUE": "dd9b29ffb0ff18a82c336894c68dcb0c9c5bcc8e9227c06cb762245a2b339166",
+   "pooled/cross/OUE_Zipf_test": "251c0abb7bc5088a4a71ddc964154d02a91e8d459d69f876920f82be8f19fd0c",
+   "fixed_beta/cross/OUE_Zipf_test": "f9cb58e0d08bb7b492795e04722abe7cf656f1bcb89f6329828225749474e469",
+   "pooled/in_dist/Emoji_OUE": "297cb48cd84786451db359f83b5c981b0377aae0b4174a0acf55d74786f983ec",
+   "fixed_beta/in_dist/Emoji_OUE": "ec75b1d0e3ac265034ec862a673216d570b3dae8712049c14a206ab5c6f479a6",
+   "pooled/cross/OUE_Emoji_test": "8f6b8eadab7fbe29ba4fb41c9357a5a5275c876e891e3326d4a5c2dccde93dbd",
+   "fixed_beta/cross/OUE_Emoji_test": "13677e5fd472f99ff51d7739b8df9d632e2b3469663b9c72e668effb95aaca15",
+   "pooled/in_dist/Fire_OUE": "8717c63292e89f0085478d095e6448c7a29b5f66226a09a3cb323caa9d5b4b95",
+   "fixed_beta/in_dist/Fire_OUE": "ece6ca4dcf066774f7e315bb79b2cb6abe3b93b161e424eb370ed0c79bb41562",
+   "pooled/cross/OUE_Fire_test": "734fa2cff0d62c0bfa93cf15b21c3274f57ebe1f1ebfea4bc3b5e26d9dbd4a57",
+   "fixed_beta/cross/OUE_Fire_test": "2429d83450e70f6cb663a8f897472bd35d0b443f6b8b4beab219fe337e0555fc",
+   "pooled/in_dist/Zipf_HST_User": "4f3134c53042f36fc77b77c149118b157638f0933590fd315e612c71faf12219",
+   "fixed_beta/in_dist/Zipf_HST_User": "0a6c391bf38e6783aacb40e8678aba0379c487a711d6eea18cfd93010fcc770e",
+   "pooled/cross/HST_User_Zipf_test": "1a63b0696f6ae9700c15a4c97cb93e1b206cbff57233543dcb633b6f1f3c7980",
+   "fixed_beta/cross/HST_User_Zipf_test": "237933ef4278e9f0b0a0adb06e325a555b8668ed603a41b4de5f04be541000ba",
+   "pooled/in_dist/Emoji_HST_User": "a360b50a1697e52941ea1927ce3b68732d00119beaf179dd5132d3810390f31d",
+   "fixed_beta/in_dist/Emoji_HST_User": "9e91dcfbf4c5a44d8f0b40b12c4eff19c07fd334aaba029cd5903f3e3385af97",
+   "pooled/cross/HST_User_Emoji_test": "a53db32b1ef3e145ec6d00110d5c2b7aad299c517da5b096b5255d8bb9b2df57",
+   "fixed_beta/cross/HST_User_Emoji_test": "a947c455d44f8747683b315eef760c2b789e595fcebd5e704bbdef6780a380fe",
+   "pooled/in_dist/Fire_HST_User": "bd0e39bccd12fc636e784bf61ef2e2b7d24a3eb1bb90968bd208a06da78df415",
+   "fixed_beta/in_dist/Fire_HST_User": "66442682b8b0d2fa2154bc932471abbea881b2bf323b3c70c045df3f1d4e0cbc",
+   "pooled/cross/HST_User_Fire_test": "9ac93eb12acc6de6acf194881359025621f79aaa61fd857ff74aa0ce673c2279",
+   "fixed_beta/cross/HST_User_Fire_test": "2170fea3bc5156bace2745095f3ed82adcd2008dce085b1d8573254cdf164e42",
+   "pooled/in_dist/Zipf_OLH_Server": "a1099bccb2eb639ebc673bf04403ce2072f35714ddc84b314e4628d7d1161781",
+   "fixed_beta/in_dist/Zipf_OLH_Server": "e804c67b525cce23e87ac468548c3a2bfde3cfff2b22f61f9f991847c1049307",
+   "pooled/cross/OLH_Server_Zipf_test": "1b6880e541ac8696c5e5b4dffe3dd2d999e7ef40f20703ab26966af9f188ad70",
+   "fixed_beta/cross/OLH_Server_Zipf_test": "0546170b6f18ec9250d4511bf9c51346cab3e5813bc8edd6b9dcbabf25d3e203",
+   "pooled/in_dist/Emoji_OLH_Server": "aedc5704769d6a7836189a00878f95d5b477e6ab068050e48d8b3311e3b9c4b2",
+   "fixed_beta/in_dist/Emoji_OLH_Server": "cb2dd7afa779f795146bb08c140d02a111d83dab52da27674adfd99a0f4170a3",
+   "pooled/cross/OLH_Server_Emoji_test": "ec2fc647e7a2c5def6fd18bae2b19a67683aef3f3e10106272c2caa020c92162",
+   "fixed_beta/cross/OLH_Server_Emoji_test": "ac8ea074803505f7c249a5465f55397e89fbcb141e23fc9eb1ff93010e6ff610",
+   "pooled/in_dist/Fire_OLH_Server": "58f123995e025dae7c9cd4ad0f231924b7f01c00e47e78789d4ad6a7845eb46f",
+   "fixed_beta/in_dist/Fire_OLH_Server": "9f6ba5c1686ce4fc46ae5ca248a283f0067b0eedd1525eada902e9783eecabfd",
+   "pooled/cross/OLH_Server_Fire_test": "3289812f2a9999acd9227c8f4318f42a332b4b179ebcf0a2061047aa3b83e1c1",
+   "fixed_beta/cross/OLH_Server_Fire_test": "e8cf2901c07dbe0706a4471eceb3b94b3a5a1476c3b2fcc38a274ccdc711d6dc"
+  },
+  "v3_norm": {
+   "OUE": {
+    "mean": [
+     0.012911614500098652,
+     0.0032967002843802442,
+     0.14731102990902514,
+     3.12563221109804e-06
+    ],
+    "std": [
+     0.7587034296797482,
+     0.7748585971605957,
+     0.7240994832143449,
+     0.00026351729269310196
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   },
+   "HST_User": {
+    "mean": [
+     0.02342286897482105,
+     0.04265822321200956,
+     0.1369168821638486,
+     -1.6080110008712907e-06
+    ],
+    "std": [
+     0.7406735874865159,
+     0.7621910486572027,
+     0.737828188940381,
+     0.00019864575648222347
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   },
+   "OLH_Server": {
+    "mean": [
+     0.00011876577869653045,
+     0.04600404969219549,
+     0.14443894647123895,
+     -1.4362512294801782e-05
+    ],
+    "std": [
+     0.7277835139913662,
+     0.7052084019639996,
+     0.7176504407143006,
+     0.00021402640094985706
+    ],
+    "feature_names": [
+     "block_projection",
+     "block_overlap",
+     "one_deviation",
+     "excess_share"
+    ],
+    "rows": 46500000,
+    "runs": 93
+   }
+  },
+  "design_sha256": {
+   "OUE": "3fb281fbe55086fc811e83b88f774d09e460e45fa0a805455e264328d7853660",
+   "HST_User": "b814f5c159a02494a3df1c7258c4d71f1b57e2ec7009ff510d4d1923a04eed3f",
+   "OLH_Server": "17af1edda064bf252773ac7380e45ef301936e907d7b742d32cfa157116295c8"
+  }
+ }
+}

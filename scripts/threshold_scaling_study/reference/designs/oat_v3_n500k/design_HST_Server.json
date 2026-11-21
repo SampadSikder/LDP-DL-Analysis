@@ -1,0 +1,488 @@
+{
+  "design": "oat",
+  "attack": "mga-a",
+  "feature_set": "v2",
+  "feature_names": [
+    "num_ones_scaled",
+    "one_deviation",
+    "k_discrepancy_scaled",
+    "k_observed_frequency_scaled",
+    "freq_ratio",
+    "is_anomalous_k",
+    "overlap_anomalous_items_ratio",
+    "max_item_freq_ratio",
+    "mean_item_freq_ratio",
+    "user_theoretical_deviation",
+    "support_entropy_scaled",
+    "max_support_value",
+    "block_projection",
+    "block_overlap"
+  ],
+  "block_candidates": 16,
+  "protocols": [
+    "HST_Server"
+  ],
+  "datasets": [
+    "zipf",
+    "emoji",
+    "fire"
+  ],
+  "n": 500000,
+  "sweeps": {
+    "epsilon": [
+      0.1,
+      0.2,
+      0.4,
+      0.6,
+      0.8,
+      1.0
+    ],
+    "attacker_ratio": [
+      0.01,
+      0.05,
+      0.06,
+      0.08,
+      0.1,
+      0.2
+    ],
+    "target_set_size": [
+      10
+    ],
+    "splits": [
+      2,
+      4,
+      6,
+      8
+    ]
+  },
+  "runs": [
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 0.1,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 0.2,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 0.4,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 0.6,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 0.8,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.01,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 4,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.06,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.08,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.1,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.2,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 2,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 6,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "zipf",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 8,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 0.1,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 0.2,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 0.4,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 0.6,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 0.8,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.01,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 4,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.06,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.08,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.1,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.2,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 2,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 6,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "emoji",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 8,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 0.1,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 0.2,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 0.4,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 0.6,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 0.8,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.01,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 4,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.06,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.08,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.1,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.2,
+      "target_set_size": 10,
+      "splits": 4,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 2,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 6,
+      "train": 1,
+      "holdout": 1
+    },
+    {
+      "dataset_type": "fire",
+      "protocol": "HST_Server",
+      "epsilon": 1.0,
+      "attacker_ratio": 0.05,
+      "target_set_size": 10,
+      "splits": 8,
+      "train": 1,
+      "holdout": 1
+    }
+  ],
+  "defaults": {
+    "epsilon": 1.0,
+    "attacker_ratio": 0.05,
+    "target_set_size": 10,
+    "splits": 4
+  },
+  "balance_attackers": 17858,
+  "holdout_replicates": 1
+}
