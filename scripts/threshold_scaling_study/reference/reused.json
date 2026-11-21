@@ -120,16 +120,16 @@
    },
    "HST_Server": {
     "mean": [
-     0.004040336086290031,
-     -0.006550397472325168,
-     0.13682565678002118,
-     -9.430803020264388e-07
+     0.0030367821793980065,
+     -0.007278469107429157,
+     0.13682565678001868,
+     4.187619310918065e-06
     ],
     "std": [
-     0.7103522247445574,
-     0.6953377848489052,
-     0.7378895438641501,
-     0.00020666972998630102
+     0.7118745729664306,
+     0.6938615525353675,
+     0.7378895438641633,
+     0.0003988240105078112
     ],
     "feature_names": [
      "block_projection",
@@ -260,5 +260,6 @@
    "HST_User": "b814f5c159a02494a3df1c7258c4d71f1b57e2ec7009ff510d4d1923a04eed3f",
    "OLH_Server": "17af1edda064bf252773ac7380e45ef301936e907d7b742d32cfa157116295c8"
   }
- }
+ },
+ "_note_hst_server": "oat_v3_n500k HST_Server, pooled: checkpoints and z-score are those of oat_apa_n500k_v3f (HST_Server runs MGA-A there; trained on output/oat_apa_n500k/HST_Server, per-user target subsets). The oat_v3_n500k HST_Server training data came from the earlier shared-subset generator; its models and z-score are not used."
 }

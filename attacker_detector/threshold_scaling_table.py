@@ -206,6 +206,11 @@ def build(cfg):
            '- The unscaled model still gets one global z-score fitted on its optimization rows (fixed constants, the '
            'same for every run); only the per-run median/IQR step is removed.',
            '- HST_Server has no APA: it is listed under MGA-A only.',
+           *[f'- {name} {P}: the pooled-beta checkpoints and their global z-score are read from {d} (models '
+             f'trained on that root\'s {P} data: MGA-A, every fake user draws its own target subset). Models in '
+             f'{name}_v3f trained on the earlier shared-subset data are not used. Earlier server-side IGR tables '
+             f'for this protocol may have scored those older models.'
+             for name, rc in cfg['roots'].items() for P, d in (rc.get('pooled_dirs') or {}).items()],
            f"- Baselines on the held-out runs: {', '.join(cfg.get('heldout_baselines', [])) or 'none'}. A baseline "
            'missing from a table failed on that run (see logs).', '']
     if len(rep):

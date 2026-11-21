@@ -68,8 +68,13 @@ POOLED_UTILITY = 'pooled_beta__utility_threshold'
 POOLED_UTILITY_ALL = 'pooled_beta__utility_threshold__all_beta_calibration'
 
 DEFAULT_ROOTS = {       # data root -> the main sweeps (HST_Server has no APA: its APA runs are MGA-A runs)
+    # pooled_from: the MGA-A pooled HST_Server models of the results are the ones trained in the APA root
+    # (same grid, MGA-A, every fake user draws its own target subset). The oat_v3_n500k training data of
+    # HST_Server came from the earlier generator, where all fake users shared one subset; models trained
+    # on it may still lie in <results>/oat_v3_n500k_v3f and are not used.
     'oat_v3_n500k': {'attack': 'mga-a', 'source_beta': 0.05,
-                     'protocols': ['OUE', 'HST_User', 'OLH_Server', 'HST_Server']},
+                     'protocols': ['OUE', 'HST_User', 'OLH_Server', 'HST_Server'],
+                     'pooled_from': {'HST_Server': 'oat_apa_n500k'}},
     'oat_apa_n500k': {'attack': 'apa', 'source_beta': 0.05, 'protocols': ['OUE', 'HST_User', 'OLH_Server']},
 }
 # the fixed-beta runs' settings (scripts/run_beta_fixed.sh FT array)
@@ -206,13 +211,18 @@ def _git():
         return {'commit': None}
 
 
+def pooled_dir(root_cfg, protocol):
+    """Results directory of the pooled-beta models of one protocol (another root's for `pooled_from`)."""
+    return (root_cfg.get('pooled_dirs') or {}).get(protocol) or root_cfg.get('pooled_dir')
+
+
 def reused_models(root_cfg, protocols):
     """(kind, dataset, protocol, 'pooled' | 'fixed_beta', model dir) of every reused checkpoint."""
     out = []
     for P in protocols:
         for D in DATASETS:
             for kind in ('in_dist', 'cross'):
-                for which, base in (('pooled', root_cfg.get('pooled_dir')), ('fixed_beta', root_cfg.get('fixed_beta_dir'))):
+                for which, base in (('pooled', pooled_dir(root_cfg, P)), ('fixed_beta', root_cfg.get('fixed_beta_dir'))):
                     if base:
                         out.append((kind, D, P, which, os.path.join(base, kind, cell(D, P, kind))))
     return out
@@ -237,8 +247,15 @@ def cmd_init(args):
         rc.setdefault('pooled_dir', _first_dir(os.path.join(results, 'archive', f'{name}_v3f'),
                                                os.path.join(results, f'{name}_v3f')))
         rc.setdefault('fixed_beta_dir', _first_dir(os.path.join(results, f'{name}_bfix')))
+        rc['pooled_dirs'] = {}
+        for P, src in (rc.get('pooled_from') or {}).items():
+            rc['pooled_dirs'][P] = _first_dir(os.path.join(results, 'archive', f'{src}_v3f'),
+                                              os.path.join(results, f'{src}_v3f'))
+            if not rc['pooled_dirs'][P]:
+                problems.append(f'{name} {P}: no pooled results of {src} (looked in {results}/archive/{src}_v3f, '
+                                f'{results}/{src}_v3f)')
         for which in ('pooled_dir', 'fixed_beta_dir'):
-            if not rc[which]:
+            if not rc[which] and (which == 'fixed_beta_dir' or set(rc['protocols']) - set(rc['pooled_dirs'])):
                 problems.append(f'{name}: no {which} (looked in {results}/archive/{name}_v3f, {results}/{name}_v3f, '
                                 f'{results}/{name}_bfix)')
         rc['design'], rc['v3_norm'], rc['checkpoints'] = {}, {}, {}
@@ -259,14 +276,14 @@ def cmd_init(args):
                 problems.append(f'{dpath}: default beta is not the source beta {rc["source_beta"]}')
             rc['design'][P] = dpath
             # pooled model's global z-score: the stored file of its training data directory
-            npath = os.path.join(rc['pooled_dir'] or '', 'igr', f'v3_norm_{P}.json')
+            npath = os.path.join(pooled_dir(rc, P) or '', 'igr', f'v3_norm_{P}.json')
             norm = _read(npath) if os.path.exists(npath) else None
             rnorm = (rref.get('v3_norm') or {}).get(P)
             if norm and rnorm and not (np.allclose(norm['mean'], rnorm['mean'], rtol=1e-9)
                                        and np.allclose(norm['std'], rnorm['std'], rtol=1e-9)):
                 problems.append(f'{npath} differs from the reference copy in {reference}/reused.json')
             norm = norm or rnorm
-            if norm is None and rc['pooled_dir']:
+            if norm is None and pooled_dir(rc, P):
                 problems.append(f'{name} {P}: no v3_norm_{P}.json for the pooled model')
             if norm:
                 rc['v3_norm'][P] = {'mean': list(norm['mean']), 'std': list(norm['std']),
@@ -318,6 +335,8 @@ def cmd_init(args):
         say(f'    {k}: {p}')
     for name, rc in roots.items():
         say(f"    {name}: pooled {rc['pooled_dir']}, fixed beta {rc['fixed_beta_dir']}")
+        for P, d in rc['pooled_dirs'].items():
+            say(f"    {name} {P}: pooled models and their z-score from {d}")
     return 0
 
 
@@ -566,14 +585,14 @@ def detectors(cfg, root, protocol, kind, dataset):
     rc = cfg['roots'][root]
     c = cell(dataset, protocol, kind)
     out = []
-    if rc.get('pooled_dir'):
+    if pooled_dir(rc, protocol):
         b = float(_read(rc['design'][protocol])['defaults']['attacker_ratio'])      # known at training time
         thr = {'fixed_p0.5': 0.0, 'fixed_prior': igr.prior_cutoff(b)}
         for rule, variant in (('utility', POOLED_UTILITY), ('utility_all_beta', POOLED_UTILITY_ALL)):
             t = _thr(variant_dir(cfg, variant, root, kind, dataset, protocol), 'threshold_utility.json')
             if t is not None:
                 thr[rule] = t
-        out.append({'model': 'pooled_beta', 'dir': os.path.join(rc['pooled_dir'], kind, c), 'source': 'scaled',
+        out.append({'model': 'pooled_beta', 'dir': os.path.join(pooled_dir(rc, protocol), kind, c), 'source': 'scaled',
                     'features': V3, 'norm': rc['v3_norm'][protocol], 'thresholds': thr})
     if rc.get('fixed_beta_dir'):
         d = os.path.join(rc['fixed_beta_dir'], kind, c)

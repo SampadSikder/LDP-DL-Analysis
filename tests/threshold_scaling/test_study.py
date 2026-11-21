@@ -93,6 +93,27 @@ class StudyPipeline(unittest.TestCase):
         with self.assertRaises(SystemExit):
             st.main(['init', '--results', self.res, '--config', self.cfg_path] + self.base)
 
+    def test_pooled_checkpoints_of_a_protocol_can_come_from_another_root(self):
+        other, ref = 'mini2', os.path.join(self.tmp, 'reference')
+        os.makedirs(os.path.join(ref, 'designs', other))
+        shutil.copyfile(os.path.join(ref, 'designs', ROOT_NAME, f'design_{P}.json'),
+                        os.path.join(ref, 'designs', other, f'design_{P}.json'))
+        for D in st.DATASETS:
+            for kind in ('in_dist', 'cross'):
+                _fake_model(os.path.join(self.res, f'{other}_bfix', kind, st.cell(D, P, kind)), True)
+        cfg_path, run_dir = os.path.join(self.tmp, 'override2.json'), os.path.join(self.res, 'study_run2')
+        with open(cfg_path, 'w') as f:
+            json.dump({'roots': {other: {'attack': 'mga-a', 'source_beta': 0.05, 'protocols': [P],
+                                         'pooled_from': {P: ROOT_NAME}}}, 'reference_dir': ref}, f)
+        self.assertEqual(st.main(['init', '--results', self.res, '--config', cfg_path, '--run-dir', run_dir]), 0)
+        cfg = st.load_cfg(run_dir)
+        pooled = os.path.join(self.res, 'archive', f'{ROOT_NAME}_v3f')
+        self.assertEqual(cfg['roots'][other]['pooled_dirs'], {P: pooled})
+        self.assertIn(f'{ROOT_NAME}_v3f', cfg['roots'][other]['checkpoints'][f'pooled/in_dist/{st.cell("fire", P, "in_dist")}']['path'])
+        self.assertTrue(cfg['roots'][other]['v3_norm'][P]['from'].startswith(pooled))
+        det = st.detectors(cfg, other, P, 'cross', 'fire')[0]
+        self.assertEqual((det['model'], det['dir']), ('pooled_beta', os.path.join(pooled, 'cross', st.cell('fire', P, 'cross'))))
+
     def test_plan_roles(self):
         df = pd.DataFrame(st.plan(self.cfg))
         n = df.groupby('role').size()

@@ -4,15 +4,15 @@
 #   2. fixed beta: four features (control), three features, three features without per-run median/IQR
 #   3. every model and threshold scored on the same simulated held-out users -> comparison tables
 #
-#   nohup bash scripts/run_threshold_scaling_study.sh all > /dev/null 2>&1 &
+#   bash scripts/run_threshold_scaling_study.sh all           # foreground; stage progress is printed and logged
 #   tail -3 results/threshold_scaling_study_runs.log          # the run directory of this invocation (or why it did not start)
-#   tail -f <run directory>/logs/launcher.log
+#   tail -f <run directory>/logs/*_shard*.log                 # per-run and per-model progress (second terminal)
 #
 # Every invocation writes to a NEW directory results/<RUN_NAME> (default
 # threshold_and_scaling_study_<date>_<time>) and stops if it exists. Existing result folders are only read.
 # An interrupted invocation is continued with RESUME=<its run directory> and the remaining stages
 # (finished runs, models and thresholds are skipped):
-#   RESUME=results/threshold_and_scaling_study_... nohup bash scripts/run_threshold_scaling_study.sh simulate train select score table pack > /dev/null 2>&1 &
+#   RESUME=results/threshold_and_scaling_study_... bash scripts/run_threshold_scaling_study.sh simulate train select score table pack
 #
 # Stages (`all` = check init plan simulate train select score table pack):
 #   check     unit tests of the study, of the fixed-beta variant and of IGR (CPU, a few minutes)
@@ -144,20 +144,20 @@ PRE=$(mktemp)                              # output of check and init, until the
 for s in "${STAGES[@]}"; do
   t0=$SECONDS
   if [[ -d $RUN_DIR/logs ]]; then
-    { say "--- stage $s"; "stage_$s"; } >> "$RUN_DIR/logs/launcher.log" 2>&1; rc=$?
+    { say "--- stage $s"; "stage_$s"; } 2>&1 | tee -a "$RUN_DIR/logs/launcher.log"; rc=${PIPESTATUS[0]}
   else
     { say "--- stage $s"; "stage_$s"; } 2>&1 | tee -a "$PRE"; rc=${PIPESTATUS[0]}
     [[ -d $RUN_DIR/logs ]] && { cat "$PRE" >> "$RUN_DIR/logs/launcher.log"; : > "$PRE"; }
   fi
   if (( rc )); then
     if [[ -d $RUN_DIR/logs ]]; then
-      say "stage $s FAILED" >> "$RUN_DIR/logs/launcher.log"
+      say "stage $s FAILED" | tee -a "$RUN_DIR/logs/launcher.log"
     else                                   # nothing was created: keep the reason where it can be found
       mkdir -p "$RES"; { echo "$(date '+%F %T') stage $s FAILED before a run directory existed:"; cat "$PRE"; } >> "$RUNS_LOG"
     fi
     rm -f "$PRE"; echo "stage $s FAILED (run directory: $RUN_DIR; see $RUNS_LOG or $RUN_DIR/logs/launcher.log)"; exit 1
   fi
-  [[ -d $RUN_DIR/logs ]] && say "stage $s done in $(( (SECONDS - t0) / 60 )) min" >> "$RUN_DIR/logs/launcher.log"
+  [[ -d $RUN_DIR/logs ]] && say "stage $s done in $(( (SECONDS - t0) / 60 )) min" | tee -a "$RUN_DIR/logs/launcher.log"
 done
 rm -f "$PRE"
 [[ -d $RUN_DIR/logs ]] && say "=== done: $RUN_DIR" >> "$RUN_DIR/logs/launcher.log"
