@@ -6,6 +6,7 @@ a run is on the same simulated users) and writes <run dir>/comparison/:
                                                    protocol and test beta
   side_by_side/paired_comparisons.csv|.md          the paired comparisons (PAIRS), with a verdict per row
   side_by_side/replication_check.csv               retrained four-feature control vs the existing model
+  side_by_side/replication_check_pooled.csv        the same for the retrained pooled-beta control
   side_by_side/limitations.md                      what differs between rows besides the named change
   in_dist/, cross/sweep_<parameter>.csv            the same metrics along each sweep (data of the figures)
 Metrics are means over the held-out runs of a row (per-run F1, recall, precision, false-positive rate,
@@ -34,6 +35,17 @@ VARIANTS = [
     ('Fixed beta, 3 features scaled + fixed threshold', 'fixed_beta_3f_scaled', 'f1'),
     ('Fixed beta, 3 features unscaled + fixed threshold', 'fixed_beta_3f_unscaled', 'f1'),
     ('Fixed beta, 4 features unscaled + fixed threshold', 'fixed_beta_4f_unscaled', 'f1'),
+    # pooled-beta models trained in this study; "fixed threshold" = p > 0.5, the reused pooled model's rule
+    ('Pooled beta, 4 features unscaled + fixed threshold', 'pooled_beta_4f_unscaled', 'fixed_p0.5'),
+    ('Pooled beta, 4 features unscaled + utility threshold', 'pooled_beta_4f_unscaled', 'utility'),
+    ('Pooled beta, 4 features unscaled + validation-F1 threshold', 'pooled_beta_4f_unscaled', 'f1'),
+    ('Pooled beta, 4 features unscaled + utility threshold, all-beta calibration', 'pooled_beta_4f_unscaled',
+     'utility_all_beta'),
+    ('Pooled beta, 4 features retrained (control) + fixed threshold', 'pooled_beta_4f_scaled_control', 'fixed_p0.5'),
+    ('Pooled beta, 4 features retrained (control) + utility threshold', 'pooled_beta_4f_scaled_control', 'utility'),
+    ('Pooled beta, 4 features retrained (control) + validation-F1 threshold', 'pooled_beta_4f_scaled_control', 'f1'),
+    ('Pooled beta, 4 features retrained (control) + utility threshold, all-beta calibration',
+     'pooled_beta_4f_scaled_control', 'utility_all_beta'),
     ('Diffstats', 'diffstats', ''),
     ('FIAD', 'fiad', ''),
     ('No removal', 'no_defense', ''),
@@ -56,6 +68,16 @@ PAIRS = [
      'Fixed beta, 4 features unscaled + fixed threshold'),
     ('adding excess_share to the unscaled model (fixed beta, utility threshold, same simulated runs)',
      'Fixed beta, 3 features unscaled + utility threshold', 'Fixed beta, 4 features unscaled + utility threshold'),
+    ('removing the per-run median/IQR scaling under pooled beta (four features, utility threshold, same '
+     'simulated runs)', 'Pooled beta, 4 features retrained (control) + utility threshold',
+     'Pooled beta, 4 features unscaled + utility threshold'),
+    ('removing the per-run median/IQR scaling under pooled beta (four features, fixed threshold p > 0.5, same '
+     'simulated runs)', 'Pooled beta, 4 features retrained (control) + fixed threshold',
+     'Pooled beta, 4 features unscaled + fixed threshold'),
+    ('training on every beta instead of the source beta (four features unscaled, utility threshold)',
+     'Fixed beta, 4 features unscaled + utility threshold', 'Pooled beta, 4 features unscaled + utility threshold'),
+    ('training on every beta instead of the source beta (four features unscaled, validation-F1 threshold)',
+     'Fixed beta, 4 features unscaled + fixed threshold', 'Pooled beta, 4 features unscaled + validation-F1 threshold'),
 ]
 METRICS = ['f1', 'recall', 'precision', 'fpr', 'igr', 'igr2']
 F1_TOL, IGR2_REL, IGR2_ABS = 0.01, 0.10, 0.001      # what counts as a change in the verdicts
@@ -183,6 +205,18 @@ def build(cfg):
         rep['f1_diff'] = rep.f1_control - rep.f1_existing
         rep.to_csv(os.path.join(side, 'replication_check.csv'), index=False)
 
+    # the same for the pooled-beta control (trained here on every config) vs the reused pooled checkpoint
+    prep = []
+    for rule in ('fixed', 'utility'):
+        a = tab[tab.variant == f'Pooled beta + {rule} threshold'].set_index(GROUP + ['test_beta'])
+        b = tab[tab.variant == f'Pooled beta, 4 features retrained (control) + {rule} threshold'].set_index(GROUP + ['test_beta'])
+        j = a[['f1', 'igr', 'igr2']].join(b[['f1', 'igr', 'igr2']], lsuffix='_existing', rsuffix='_control', how='inner')
+        prep.append(j.assign(threshold=rule).reset_index())
+    prep = pd.concat(prep, ignore_index=True)
+    if len(prep):
+        prep['f1_diff'] = prep.f1_control - prep.f1_existing
+        prep.to_csv(os.path.join(side, 'replication_check_pooled.csv'), index=False)
+
     for kind in ('in_dist', 'cross'):
         d = df[df.kind == kind]
         dflt = {'epsilon': 1.0, 'test_beta': float(next(iter(cfg['roots'].values()))['source_beta']), 'splits': 4}
@@ -207,6 +241,13 @@ def build(cfg):
            *[f"- Added to this run directory on {e['added']} (code {e['git'].get('commit')}): "
              f"{', '.join(e['variants'])}. Trained on the same stored simulations as the other new models; all "
              'rows were scored again together.' for e in cfg.get('extensions', [])],
+           *(['- The pooled-beta models trained here (retrained control, four features unscaled) use the fixed-beta '
+              'procedure on the training runs of every config of the sweep: equal rows per config, 50/50 classes, '
+              'same budget and seed, z-score from the optimization rows, early stopping on balanced validation rows '
+              'of every config. The reused pooled checkpoint was trained by main.py on the stored datasets; '
+              'replication_check_pooled.csv shows how far the retrained control is from it. Their "fixed threshold" '
+              'is p > 0.5; the validation-F1 threshold is selected for beta = 0.05 like the fixed-beta models\'.']
+             if len(prep) else []),
            '- "Fixed beta + utility threshold" uses the existing threshold_utility.json, calibrated on an earlier '
            'simulation of the utility-validation runs. Every other utility threshold here was calibrated on this '
            "run's utility-validation simulations (same configs and seeds).",

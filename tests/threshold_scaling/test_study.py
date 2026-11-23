@@ -22,6 +22,7 @@ from attacker_detector import threshold_scaling_table as tb
 N, ROOT_NAME, P = 3000, 'mini', 'OUE'
 FIRST = list(st.TRAINED)[:3]                    # what the run directory starts with
 ADDED = 'fixed_beta__four_features_unscaled'    # added to the finished run directory by `extend`
+POOLED = ['pooled_beta__four_features_scaled__control', 'pooled_beta__four_features_unscaled']   # added too
 
 
 def _design():
@@ -79,7 +80,8 @@ class StudyPipeline(unittest.TestCase):
         scored = os.path.join(cls.run_dir, 'scores', ROOT_NAME, 'scored_runs.csv')
         cls.first_scores = pd.read_csv(scored, keep_default_na=False)
         cls.first_models = cls._listing(os.path.join(cls.run_dir, 'variants'))
-        for cmd in ('extend', 'train', 'select', 'score', 'table'):
+        cls.first_runs = cls._listing(os.path.join(cls.run_dir, 'simulated_runs'))
+        for cmd in ('extend', 'simulate', 'train', 'select', 'score', 'table'):
             cls.rc |= st.main([cmd] + cls.base)
         cls.after = cls._listing(pooled) + cls._listing(bfix)
         cls.cfg = st.load_cfg(cls.run_dir)
@@ -125,8 +127,12 @@ class StudyPipeline(unittest.TestCase):
     def test_plan_roles(self):
         df = pd.DataFrame(st.plan(self.cfg))
         n = df.groupby('role').size()
-        # per dataset: 3 configs, 2 of them at the source beta
-        self.assertEqual(n.to_dict(), {'heldout_test': 9, 'train_source': 6, 'validation': 6, 'utility_validation': 9})
+        # per dataset: 3 configs, 2 of them at the source beta; the third trains the pooled-beta models
+        self.assertEqual(n.to_dict(), {'heldout_test': 9, 'train_source': 6, 'validation': 6, 'utility_validation': 9,
+                                       'train_other': 3, 'validation_other': 3})
+        self.assertEqual(set(df[df.role.isin(['train_other', 'validation_other'])].attacker_ratio), {0.1})
+        first = dict(self.cfg, trained_variants={v: st.TRAINED[v] for v in FIRST})      # before the extension
+        self.assertEqual(len(st.plan(first)), 30)
         self.assertEqual(df.seed.nunique(), len(df))
         self.assertTrue((df[df.role == 'validation'].replicate == 1000).all())
         self.assertTrue((df[df.role == 'utility_validation'].replicate == 2000).all())
@@ -156,8 +162,11 @@ class StudyPipeline(unittest.TestCase):
                 self.assertEqual(man['budget']['optimization_rows'], 540)
                 self.assertEqual(man['budget']['optimization_attackers'], 270)
                 self.assertEqual(man['budget']['validation_rows'], 60)
-                self.assertEqual(len(man['eligible_configs']), n_cfg)
-                self.assertTrue(all(c['source_beta'] == 0.05 for c in man['eligible_configs']))
+                pooled = spec.get('training_betas') == 'all'
+                self.assertEqual(len(man['eligible_configs']), n_cfg * 3 // 2 if pooled else n_cfg)
+                self.assertEqual(man['training_betas'], [0.05, 0.1] if pooled else [0.05])
+                q = [c['optimization_rows_per_class'] for c in man['eligible_configs']]
+                self.assertLessEqual(max(q) - min(q), 1)        # every config weighs the same
                 self.assertEqual(st._read(os.path.join(d, 'scaler.json'))['feature_names'], spec['features'])
                 rec = refbeta.load_threshold(d)
                 self.assertEqual(rec['model']['checkpoint_sha256'], refbeta.file_sha256(os.path.join(d, 'model.pt')))
@@ -167,11 +176,15 @@ class StudyPipeline(unittest.TestCase):
         self.assertEqual(a, b)
 
     def test_extend_adds_a_variant_and_keeps_what_was_finished(self):
-        self.assertEqual(list(self.cfg['trained_variants']), FIRST + [ADDED])
-        self.assertEqual([e['variants'] for e in self.cfg['extensions']], [[ADDED]])
+        self.assertEqual(list(self.cfg['trained_variants']), FIRST + [ADDED] + POOLED)
+        self.assertEqual([e['variants'] for e in self.cfg['extensions']], [[ADDED] + POOLED])
         now = dict((p, (s, m)) for p, s, m in self._listing(os.path.join(self.run_dir, 'variants')))
         for p, size, mtime in self.first_models:           # no finished model or threshold was written again
             self.assertEqual(now[p], (size, mtime), p)
+        runs = dict((p, (s, m)) for p, s, m in self._listing(os.path.join(self.run_dir, 'simulated_runs')))
+        for p, size, mtime in self.first_runs:             # no stored run was simulated again
+            self.assertEqual(runs[p], (size, mtime), p)
+        self.assertEqual(len(runs) - len(self.first_runs), 6)
         d = st.variant_dir(self.cfg, ADDED, ROOT_NAME, 'cross', 'fire', P)
         self.assertEqual(st._read(os.path.join(d, 'scaler.json'))['feature_names'], st.V3)
         self.assertEqual(st._read(os.path.join(d, 'variant.json'))['identity']['feature_source'], 'raw')
@@ -179,9 +192,17 @@ class StudyPipeline(unittest.TestCase):
         # the rows scored before the extension come out the same; the new model's rows are added
         df = pd.read_csv(os.path.join(self.run_dir, 'scores', ROOT_NAME, 'scored_runs.csv'), keep_default_na=False)
         key = ['dataset_type', 'epsilon', 'attacker_ratio', 'kind', 'model', 'threshold_rule']
-        old = df[df.model != 'fixed_beta_4f_unscaled'].sort_values(key).reset_index(drop=True)
+        new = df.model.isin(['fixed_beta_4f_unscaled', 'pooled_beta_4f_scaled_control', 'pooled_beta_4f_unscaled'])
+        old = df[~new].sort_values(key).reset_index(drop=True)
         pd.testing.assert_frame_equal(old, self.first_scores.sort_values(key).reset_index(drop=True))
-        self.assertEqual(len(df) - len(old), 9 * 2 * 2)     # runs x kinds x threshold rules
+        # runs x kinds x threshold rules: fixed beta 2; each pooled model p > 0.5, F1, utility, utility all-beta
+        self.assertEqual(len(df) - len(old), 9 * 2 * (2 + 2 * 4))
+        self.assertEqual(set(df[df.model == 'pooled_beta_4f_unscaled'].threshold_rule),
+                         {'fixed_p0.5', 'f1', 'utility', 'utility_all_beta'})
+        rec = st._read(os.path.join(st.variant_dir(self.cfg, POOLED[1], ROOT_NAME, 'cross', 'fire', P),
+                                    st.ALL_BETA_DIR, 'threshold_utility.json'))
+        self.assertEqual(rec['calibration_betas'], [0.05, 0.1])
+        self.assertNotIn('fire', {r['dataset_type'] for r in rec['utility_validation_runs']})
         self.assertEqual(st.main(['extend'] + self.base), 0)          # nothing left to add
         self.assertEqual(len(st.load_cfg(self.run_dir)['extensions']), 1)
         with self.assertRaises(SystemExit):
@@ -212,8 +233,8 @@ class StudyPipeline(unittest.TestCase):
         df = pd.read_csv(os.path.join(self.run_dir, 'scores', ROOT_NAME, 'scored_runs.csv'), keep_default_na=False)
         per_run = df.groupby(['dataset_type', 'epsilon', 'attacker_ratio']).size()
         self.assertEqual(len(per_run), 9)
-        # 3 reference rows + 2 kinds x (pooled 4 rules + existing 2 + 4 trained x 2)
-        self.assertTrue((per_run == 3 + 2 * 14).all())
+        # 3 reference rows + 2 kinds x (pooled 4 rules + existing 2 + 4 fixed-beta trained x 2 + 2 pooled trained x 4)
+        self.assertTrue((per_run == 3 + 2 * 22).all())
         u = st.load_runs(self.cfg, ROOT_NAME, 'heldout_test', P, ['zipf'])[0]
         row = df[(df.dataset_type == 'zipf') & (df.model == 'oracle') & (df.seed == u.run['seed'])].iloc[0]
         self.assertEqual(int(row.TP), int(u.labels.sum()))
@@ -229,7 +250,8 @@ class StudyPipeline(unittest.TestCase):
         pc = pd.read_csv(os.path.join(side, 'paired_comparisons.csv'))
         self.assertEqual(pc.comparison.nunique(), len(tb.PAIRS))
         self.assertEqual(len(pc), len(tb.PAIRS) * 2 * 2)          # comparisons x kinds x test betas
-        for f in ('limitations.md', 'paired_comparisons.md', 'side_by_side_by_test_beta.md', 'replication_check.csv'):
+        for f in ('limitations.md', 'paired_comparisons.md', 'side_by_side_by_test_beta.md', 'replication_check.csv',
+                  'replication_check_pooled.csv'):
             self.assertTrue(os.path.exists(os.path.join(side, f)), f)
 
 

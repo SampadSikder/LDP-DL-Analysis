@@ -16,6 +16,12 @@ Two experiments, scored together on the same simulated held-out users:
                                                  (added later; `extend` adds it to an existing run directory)
    Each then gets one global z-score fitted on its optimization rows (fixed constants, the same for every
    run), its F1-selected threshold and its own utility threshold.
+3. Pooled beta without the per-run median/IQR scaling (added later). Two models are trained by the same
+   procedure on the training runs of EVERY config of the sweep (every beta; equal rows per config, 50/50):
+     pooled_beta__four_features_scaled__control  the four v3 features (per-run median/IQR on three)
+     pooled_beta__four_features_unscaled         the same three before the per-run median/IQR + excess_share
+   They are scored at p > 0.5 (the reused pooled model's fixed rule), at their F1-selected threshold and
+   at utility thresholds calibrated at the source beta and on every config.
 
 The server no longer holds the main-sweep datasets, and datasets never stored reports. So every run the
 study needs is simulated once from the saved design (attacker_detector/igr.simulate, seeded like the
@@ -24,6 +30,8 @@ datasets: same true items and targets, fresh LDP noise) and kept compactly (Stud
   validation          replicate 1000                                      (early stopping, F1 threshold)
   utility_validation  replicate 2000                                      (utility threshold)
   heldout_test        the dataset's held-out replicate of every config    (all test betas)
+  train_other, validation_other   the same two roles for the configs at the other betas; only planned
+                      when a pooled-beta model is trained here
 Every model and every threshold is scored on the same heldout_test users, next to no removal, perfect
 removal and Diffstats.
 
@@ -52,7 +60,7 @@ MARKER = 'study_config.json'
 REFERENCE = os.path.join(ROOT, 'scripts', 'threshold_scaling_study', 'reference')
 V3 = ['block_projection', 'block_overlap', 'one_deviation', 'excess_share']
 RAW3 = ['block_projection', 'block_overlap', 'one_deviation']
-ROLES = ('train_source', 'validation', 'utility_validation', 'heldout_test')
+ROLES = ('train_source', 'validation', 'utility_validation', 'heldout_test', 'train_other', 'validation_other')
 DATASETS = ('zipf', 'emoji', 'fire')
 
 TRAINED = {
@@ -69,7 +77,21 @@ TRAINED = {
         'model': 'fixed_beta_4f_unscaled', 'source': 'raw', 'features': V3,
         'per_run_scaling': 'none on block_projection, block_overlap, one_deviation (extractor values as they '
                            'are); excess_share as in the four-feature models (it never had the median/IQR step)'},
+    # trained on every config of the sweep (all betas), like the reused pooled-beta checkpoints
+    'pooled_beta__four_features_scaled__control': {
+        'model': 'pooled_beta_4f_scaled_control', 'source': 'scaled', 'features': V3, 'training_betas': 'all',
+        'per_run_scaling': 'median/IQR of the run on block_projection, block_overlap, one_deviation'},
+    'pooled_beta__four_features_unscaled': {
+        'model': 'pooled_beta_4f_unscaled', 'source': 'raw', 'features': V3, 'training_betas': 'all',
+        'per_run_scaling': 'none on block_projection, block_overlap, one_deviation (extractor values as they '
+                           'are); excess_share as in the four-feature models (it never had the median/IQR step)'},
 }
+ALL_BETA_DIR = 'all_beta_calibration'      # second utility threshold of a pooled model trained here
+
+
+def pooled_training(cfg):
+    """True when a trained variant uses the training runs of every beta (they are then planned)."""
+    return any(v.get('training_betas') == 'all' for v in cfg['trained_variants'].values())
 POOLED_UTILITY = 'pooled_beta__utility_threshold'
 POOLED_UTILITY_ALL = 'pooled_beta__utility_threshold__all_beta_calibration'
 
@@ -372,6 +394,10 @@ def cmd_extend(args):
     refbeta._write_json(os.path.join(args.run_dir, MARKER), {k: v for k, v in cfg.items() if k != 'run_dir'})
     n = sum(len(rc['protocols']) for rc in cfg['roots'].values()) * len(DATASETS) * 2
     say(f'extend: added {new} ({n} models each) to {args.run_dir}')
+    todo = sum(not os.path.exists(run_path(cfg, r)) for r in plan(cfg))
+    if todo:
+        say(f'extend: {todo} more runs to simulate (training and validation runs at the other betas); run the '
+            f'simulate stage before train')
     return 0
 
 
@@ -396,6 +422,8 @@ def plan(cfg):
                     reps += [('train_source', j) for j in range(int(g.get('train', 1)))] + [('validation', val_rep)]
                 if src or cfg['pooled_all_beta_calibration']:
                     reps.append(('utility_validation', ut.REPLICATE_OFFSET))
+                if not src and pooled_training(cfg):
+                    reps += [('train_other', j) for j in range(int(g.get('train', 1)))] + [('validation_other', val_rep)]
                 for role, rep in reps:
                     runs.append({
                         'root': name, 'attack': rc['attack'], 'role': role, 'dataset_type': g['dataset_type'],
@@ -518,20 +546,31 @@ def train_model(cfg, variant, root, protocol, kind, dataset, device):
         return 'skip'
     os.makedirs(out, exist_ok=True)
     src_beta, tds = float(rc['source_beta']), train_datasets(kind, dataset)
+    pooled = spec.get('training_betas') == 'all'
     identity = {'study': cfg['study'], 'variant': variant, 'root': root, 'attack': rc['attack'], 'protocol': protocol,
                 'training_method': 'none' if kind == 'in_dist' else 'cross', 'train_datasets': tds,
                 'test_dataset': dataset, 'source_beta': src_beta, 'features': spec['features'],
+                'training_betas': 'every beta of the sweep' if pooled else 'source beta only',
                 'per_run_scaling': spec['per_run_scaling'], 'feature_source': spec['source'],
                 'global_scaling': 'one z-score fitted on the optimization rows, applied unchanged everywhere',
                 'hyperparameters': hp}
     started = time.strftime('%F %T')
     refbeta._write_json(vpath, {'variant': variant, 'status': 'running', 'identity': identity, 'started': started})
 
-    X_opt, y_opt, f_opt = _stack(load_runs(cfg, root, 'train_source', protocol, tds), spec)
-    X_va, y_va, f_va = _stack(load_runs(cfg, root, 'validation', protocol, tds), spec)
-    if not np.isclose(f_opt.attacker_ratio, src_beta, atol=1e-9).all() or \
-            not np.isclose(f_va.attacker_ratio, src_beta, atol=1e-9).all():
+    opt_runs = load_runs(cfg, root, 'train_source', protocol, tds)
+    val_runs = load_runs(cfg, root, 'validation', protocol, tds)
+    if pooled:          # plus the configs at the other betas: every config of the sweep, equal rows each
+        opt_runs += load_runs(cfg, root, 'train_other', protocol, tds)
+        val_runs += load_runs(cfg, root, 'validation_other', protocol, tds)
+    X_opt, y_opt, f_opt = _stack(opt_runs, spec)
+    X_va, y_va, f_va = _stack(val_runs, spec)
+    del opt_runs, val_runs
+    at_source = np.isclose(f_opt.attacker_ratio, src_beta, atol=1e-9).all() and \
+        np.isclose(f_va.attacker_ratio, src_beta, atol=1e-9).all()
+    if not pooled and not at_source:
         raise RuntimeError('training or validation runs at another share than the source beta')
+    if pooled and at_source:
+        raise RuntimeError('a pooled-beta model needs training runs at the other betas')
     tr_idx, va_idx, cfg_rows = refbeta.sample_development_rows(f_opt, f_va, hp['train_samples'], hp['val_size'],
                                                                hp['seed'])
     mean, std = X_opt[tr_idx].mean(axis=0), X_opt[tr_idx].std(axis=0)
@@ -546,7 +585,9 @@ def train_model(cfg, variant, root, protocol, kind, dataset, device):
 
     X_tr, y_tr = scale(X_opt[tr_idx]), y_opt[tr_idx].astype(np.float32)
     X_val, y_val = scale(X_va[va_idx]), y_va[va_idx].astype(np.float32)
-    manifest = {'variant': variant, 'source_beta': src_beta, 'training_class_share': 0.5, 'train_datasets': tds,
+    manifest = {'variant': variant, 'source_beta': src_beta,
+                'training_betas': sorted({float(c['source_beta']) for c in cfg_rows}),
+                'training_class_share': 0.5, 'train_datasets': tds,
                 'test_dataset': dataset, 'protocols': [protocol],
                 'budget': {'development_rows': int(hp['train_samples']), 'optimization_rows': int(len(tr_idx)),
                            'optimization_attackers': int(y_tr.sum()), 'validation_rows': int(len(va_idx)),
@@ -639,10 +680,14 @@ def detectors(cfg, root, protocol, kind, dataset):
         d = variant_dir(cfg, variant, root, kind, dataset, protocol)
         if not os.path.exists(os.path.join(d, 'threshold.json')):
             continue
+        thr = [('f1', _thr(d, 'threshold.json')), ('utility', _thr(d, 'threshold_utility.json'))]
+        pooled = spec.get('training_betas') == 'all'
+        if pooled:      # the reused pooled model's fixed rule and its second calibration
+            thr = [('fixed_p0.5', 0.0)] + thr + [('utility_all_beta',
+                                                  _thr(os.path.join(d, ALL_BETA_DIR), 'threshold_utility.json'))]
         out.append({'model': spec['model'], 'variant': variant, 'dir': d, 'source': spec['source'],
-                    'features': spec['features'], 'norm': refbeta.load_scaler(d),
-                    'thresholds': {k: v for k, v in (('f1', _thr(d, 'threshold.json')),
-                                                     ('utility', _thr(d, 'threshold_utility.json'))) if v is not None}})
+                    'features': spec['features'], 'norm': refbeta.load_scaler(d), 'pooled_training': pooled,
+                    'thresholds': {k: v for k, v in thr if v is not None}})
     return out
 
 
@@ -746,8 +791,14 @@ def cmd_select(args):
                                                                        'of the sweep (every training beta)'))
                     elif 'variant' in det:
                         todo.append((det['variant'], src_runs, 'utility-validation runs at the source beta'))
+                        if det.get('pooled_training') and all_runs is not None:
+                            todo.append((os.path.join(det['variant'], ALL_BETA_DIR), all_runs,
+                                         'one utility-validation run of every config of the sweep (every '
+                                         'training beta)'))
                     for variant, runs, pop in todo:
-                        out = variant_dir(cfg, variant, root, kind, D, P)
+                        out = variant_dir(cfg, os.path.dirname(variant) or variant, root, kind, D, P)
+                        if os.path.basename(variant) == ALL_BETA_DIR:
+                            out = os.path.join(out, ALL_BETA_DIR)
                         if os.path.exists(os.path.join(out, 'threshold_utility.json')):
                             continue
                         rec = _select(det, runs, scorer, out, {**base, 'variant': variant,

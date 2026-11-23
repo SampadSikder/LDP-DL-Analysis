@@ -3,6 +3,7 @@
 #   1. pooled-beta checkpoints (reused) with a utility-selected threshold
 #   2. fixed beta: four features (control), three features, three features without per-run median/IQR,
 #      four features without per-run median/IQR (excess_share kept)
+#      pooled beta trained here: four features (control) and four features without per-run median/IQR
 #   3. every model and threshold scored on the same simulated held-out users -> comparison tables
 #
 #   bash scripts/run_threshold_scaling_study.sh all           # foreground; stage progress is printed and logged
@@ -14,9 +15,10 @@
 # An interrupted invocation is continued with RESUME=<its run directory> and the remaining stages
 # (finished runs, models and thresholds are skipped):
 #   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh simulate train select score table pack
-# A model variant added to the code later is added to a finished run directory with the extend stage: only
-# its models are trained (42 for both roots), every model is scored again, tables and the tarball are redone:
-#   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh extend train select score table pack
+# Model variants added to the code later are added to a finished run directory with the extend stage: only
+# the runs and models they need are simulated and trained (42 models per variant for both roots; the
+# pooled-beta variants need 273 more runs), every model is scored again, tables and the tarball are redone:
+#   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh extend simulate train select score table pack
 #
 # Stages (`all` = check init plan simulate train select score table pack):
 #   check     unit tests of the study, of the fixed-beta variant and of IGR (CPU, a few minutes)
@@ -25,8 +27,9 @@
 #   extend    (RESUME only) add the trained variants the run directory does not have yet (VARIANTS limits
 #             them); stops if a simulated run is missing
 #   plan      runs to simulate per root, role and protocol
-#   simulate  every training-source, validation, utility-validation and held-out run, once (966 runs for
-#             both roots); SHARDS processes x PROC threads; Diffstats is flagged on the held-out runs
+#   simulate  every training, validation, utility-validation and held-out run, once (966 runs for both
+#             roots, 1239 with the pooled-beta variants); SHARDS processes x PROC threads; Diffstats is
+#             flagged on the held-out runs
 #   train     the fixed-beta feature variants, one model per root, protocol, dataset and kind
 #             (42 models per variant for both roots); JOBS processes on the GPUs in GPUS
 #   select    utility threshold (mean IGR^2 on utility-validation runs) of the pooled checkpoints and of the
@@ -57,7 +60,7 @@ say () { echo "[$(date '+%F %T')] $*"; }
 study () { "$PY" -m attacker_detector.threshold_scaling_study "$@" --run-dir "$RUN_DIR"; }
 
 STAGES=("$@")
-(( ${#STAGES[@]} )) || { sed -n '2,41p' "$0"; exit 1; }
+(( ${#STAGES[@]} )) || { sed -n '2,44p' "$0"; exit 1; }
 if [[ -n ${RESUME:-} ]]; then
   RUN_DIR=${RESUME%/}
   [[ -f $RUN_DIR/study_config.json ]] || { echo "RESUME=$RUN_DIR is not a run directory of this study"; exit 1; }
