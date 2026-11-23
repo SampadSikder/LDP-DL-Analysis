@@ -6,12 +6,14 @@ Two experiments, scored together on the same simulated held-out users:
    <root>_v3f) are reused unchanged: same four v3 features, same global z-score, same weights. Only the
    cut-off changes: the mean-IGR^2 threshold of attacker_detector/utility_threshold.py, selected on
    utility-validation runs. Nothing of a test run (labels, beta, targets, IGR) enters the selection.
-2. Fixed beta without the per-run median/IQR scaling. Three models are trained the fixed-beta way
+2. Fixed beta without the per-run median/IQR scaling. Four models are trained the fixed-beta way
    (attacker_detector/reference_beta.py: source-beta runs only, 50/50 rows, same budget, seed, quotas):
      fixed_beta__four_features_scaled__control   block_projection, block_overlap, one_deviation
                                                  (per-run median/IQR) + excess_share
      fixed_beta__three_features_scaled           the same without excess_share
      fixed_beta__three_features_unscaled         the same three, per-run median/IQR NOT applied
+     fixed_beta__four_features_unscaled          the same three without per-run median/IQR + excess_share
+                                                 (added later; `extend` adds it to an existing run directory)
    Each then gets one global z-score fitted on its optimization rows (fixed constants, the same for every
    run), its F1-selected threshold and its own utility threshold.
 
@@ -63,6 +65,10 @@ TRAINED = {
     'fixed_beta__three_features_unscaled': {
         'model': 'fixed_beta_3f_unscaled', 'source': 'raw', 'features': RAW3,
         'per_run_scaling': 'none (extractor values as they are)'},
+    'fixed_beta__four_features_unscaled': {
+        'model': 'fixed_beta_4f_unscaled', 'source': 'raw', 'features': V3,
+        'per_run_scaling': 'none on block_projection, block_overlap, one_deviation (extractor values as they '
+                           'are); excess_share as in the four-feature models (it never had the median/IQR step)'},
 }
 POOLED_UTILITY = 'pooled_beta__utility_threshold'
 POOLED_UTILITY_ALL = 'pooled_beta__utility_threshold__all_beta_calibration'
@@ -132,8 +138,11 @@ class StudyRun(ut.UtilityRun):
                        float(z['A']), float(z['B']), float(z['true_t']), z['raw3'].astype(np.float64), flags)
 
     def inputs(self, source, features):
+        """Model input columns. 'raw': the three block / count features before the per-run median/IQR;
+        excess_share has no such step and is the same column in both sources."""
         if source == 'raw':
-            return self.raw3[:, [RAW3.index(c) for c in features]]
+            return np.column_stack([self.raw3[:, RAW3.index(c)] if c in RAW3 else self.feats[:, V3.index(c)]
+                                    for c in features])
         return self.feats[:, [V3.index(c) for c in features]]
 
     def metrics(self, flagged):
@@ -337,6 +346,32 @@ def cmd_init(args):
         say(f"    {name}: pooled {rc['pooled_dir']}, fixed beta {rc['fixed_beta_dir']}")
         for P, d in rc['pooled_dirs'].items():
             say(f"    {name} {P}: pooled models and their z-score from {d}")
+    return 0
+
+
+def cmd_extend(args):
+    """Add trained variants to an existing run directory (default: every variant of TRAINED it does not
+    have). Only study_config.json changes; train and select then skip what is finished, score and table are
+    redone with the new models next to the old ones on the same held-out users."""
+    cfg = load_cfg(args.run_dir)
+    unknown = [v for v in args.variants or [] if v not in TRAINED]
+    if unknown:
+        raise SystemExit(f'extend: unknown variant(s) {unknown}; known: {list(TRAINED)}')
+    new = [v for v in (args.variants or TRAINED) if v not in cfg['trained_variants']]
+    if not new:
+        say(f"extend: nothing to add; the run directory has {list(cfg['trained_variants'])}")
+        return 0
+    missing = [p for p in map(lambda r: run_path(cfg, r), plan(cfg)) if not os.path.exists(p)]
+    if missing:
+        raise SystemExit(f'extend: {len(missing)} simulated runs are missing (first: {missing[0]}); nothing was '
+                         f'changed. Run the simulate stage on this run directory first (finished runs are skipped).')
+    for v in new:
+        cfg['trained_variants'][v] = TRAINED[v]
+    cfg.setdefault('extensions', []).append({'added': time.strftime('%F %T'), 'variants': new, 'git': _git(),
+                                             'command': ' '.join(sys.argv)})
+    refbeta._write_json(os.path.join(args.run_dir, MARKER), {k: v for k, v in cfg.items() if k != 'run_dir'})
+    n = sum(len(rc['protocols']) for rc in cfg['roots'].values()) * len(DATASETS) * 2
+    say(f'extend: added {new} ({n} models each) to {args.run_dir}')
     return 0
 
 
@@ -774,13 +809,14 @@ def cmd_score(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('cmd', choices=['init', 'plan', 'simulate', 'train', 'select', 'score', 'table'])
+    ap.add_argument('cmd', choices=['init', 'extend', 'plan', 'simulate', 'train', 'select', 'score', 'table'])
     ap.add_argument('--run-dir', required=True)
     ap.add_argument('--results', default=os.path.join(ROOT, 'results'), help='init: where existing results live')
     ap.add_argument('--roots', nargs='+', choices=sorted(DEFAULT_ROOTS), help='init: data roots (default: both)')
     ap.add_argument('--config', help='init: JSON overriding roots / train settings (tests, smoke runs)')
     ap.add_argument('--baselines', nargs='*', default=['diffstats'], choices=['diffstats', 'fiad'],
                     help='init: baselines flagged on the held-out runs (FIAD is slow)')
+    ap.add_argument('--variants', nargs='+', help='extend: trained variants to add (default: all it lacks)')
     ap.add_argument('--shard', type=int, default=0)
     ap.add_argument('--num-shards', type=int, default=1)
     ap.add_argument('--processors', type=int, default=4)
@@ -788,7 +824,7 @@ def main(argv=None):
     if args.cmd == 'table':
         from .threshold_scaling_table import build
         return build(load_cfg(args.run_dir))
-    return {'init': cmd_init, 'plan': cmd_plan, 'simulate': cmd_simulate, 'train': cmd_train,
+    return {'init': cmd_init, 'extend': cmd_extend, 'plan': cmd_plan, 'simulate': cmd_simulate, 'train': cmd_train,
             'select': cmd_select, 'score': cmd_score}[args.cmd](args)
 
 

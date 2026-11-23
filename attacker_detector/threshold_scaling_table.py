@@ -4,7 +4,7 @@ Reads <run dir>/scores/<root>/cells/*.csv (one row per held-out run, model and t
 a run is on the same simulated users) and writes <run dir>/comparison/:
   side_by_side/side_by_side_by_test_beta.csv|.md   every variant next to the others, per attack, kind,
                                                    protocol and test beta
-  side_by_side/paired_comparisons.csv|.md          the three paired comparisons, with a verdict per row
+  side_by_side/paired_comparisons.csv|.md          the paired comparisons (PAIRS), with a verdict per row
   side_by_side/replication_check.csv               retrained four-feature control vs the existing model
   side_by_side/limitations.md                      what differs between rows besides the named change
   in_dist/, cross/sweep_<parameter>.csv            the same metrics along each sweep (data of the figures)
@@ -18,7 +18,7 @@ import os
 import numpy as np
 import pandas as pd
 
-# (label, model, threshold rule); the first six are the side-by-side set that was asked for
+# (label, model, threshold rule); the first seven are the side-by-side set that was asked for
 VARIANTS = [
     ('Fixed beta + fixed threshold', 'fixed_beta_4f_scaled_existing', 'f1'),
     ('Pooled beta + fixed threshold', 'pooled_beta', 'fixed_p0.5'),
@@ -26,18 +26,20 @@ VARIANTS = [
     ('Pooled beta + utility threshold', 'pooled_beta', 'utility'),
     ('Fixed beta, 3 features scaled + utility threshold', 'fixed_beta_3f_scaled', 'utility'),
     ('Fixed beta, 3 features unscaled + utility threshold', 'fixed_beta_3f_unscaled', 'utility'),
+    ('Fixed beta, 4 features unscaled + utility threshold', 'fixed_beta_4f_unscaled', 'utility'),
     ('Pooled beta + fixed threshold p > 1 - beta', 'pooled_beta', 'fixed_prior'),
     ('Pooled beta + utility threshold, all-beta calibration', 'pooled_beta', 'utility_all_beta'),
     ('Fixed beta, 4 features retrained (control) + fixed threshold', 'fixed_beta_4f_scaled_control', 'f1'),
     ('Fixed beta, 4 features retrained (control) + utility threshold', 'fixed_beta_4f_scaled_control', 'utility'),
     ('Fixed beta, 3 features scaled + fixed threshold', 'fixed_beta_3f_scaled', 'f1'),
     ('Fixed beta, 3 features unscaled + fixed threshold', 'fixed_beta_3f_unscaled', 'f1'),
+    ('Fixed beta, 4 features unscaled + fixed threshold', 'fixed_beta_4f_unscaled', 'f1'),
     ('Diffstats', 'diffstats', ''),
     ('FIAD', 'fiad', ''),
     ('No removal', 'no_defense', ''),
     ('Perfect removal', 'oracle', ''),
 ]
-MAIN = [v[0] for v in VARIANTS[:6]]
+MAIN = [v[0] for v in VARIANTS[:7]]
 PAIRS = [
     ('threshold selection on the same pooled checkpoint', 'Pooled beta + fixed threshold',
      'Pooled beta + utility threshold'),
@@ -46,6 +48,14 @@ PAIRS = [
      'Fixed beta, 3 features scaled + utility threshold'),
     ('removing the per-run median/IQR scaling (fixed beta, utility threshold, same simulated runs)',
      'Fixed beta, 3 features scaled + utility threshold', 'Fixed beta, 3 features unscaled + utility threshold'),
+    ('removing the per-run median/IQR scaling with excess_share kept (fixed beta, utility threshold, same '
+     'simulated runs)', 'Fixed beta, 4 features retrained (control) + utility threshold',
+     'Fixed beta, 4 features unscaled + utility threshold'),
+    ('removing the per-run median/IQR scaling with excess_share kept (fixed beta, fixed threshold, same '
+     'simulated runs)', 'Fixed beta, 4 features retrained (control) + fixed threshold',
+     'Fixed beta, 4 features unscaled + fixed threshold'),
+    ('adding excess_share to the unscaled model (fixed beta, utility threshold, same simulated runs)',
+     'Fixed beta, 3 features unscaled + utility threshold', 'Fixed beta, 4 features unscaled + utility threshold'),
 ]
 METRICS = ['f1', 'recall', 'precision', 'fpr', 'igr', 'igr2']
 F1_TOL, IGR2_REL, IGR2_ABS = 0.01, 0.10, 0.001      # what counts as a change in the verdicts
@@ -189,11 +199,14 @@ def build(cfg):
            '- All rows of a held-out run are on the same simulated users (one simulation per run, seeded like the '
            'dataset: same true items and targets as the dataset\'s held-out run, fresh LDP noise). Numbers therefore '
            'differ slightly from earlier tables, which used other simulations of the same runs.',
-           '- Pooled beta and the existing fixed-beta model were trained on the stored datasets. The three new '
+           '- Pooled beta and the existing fixed-beta model were trained on the stored datasets. The new '
            'fixed-beta models were trained on new simulations of the same training runs (same configs, seeds, budget, '
            'quotas; fresh LDP noise), because the server no longer holds the datasets. The retrained four-feature '
-           'control is the like-for-like partner of the two three-feature models; replication_check.csv shows how far '
-           'it is from the existing model.',
+           'control is the like-for-like partner of the three-feature models and of the unscaled four-feature '
+           'model; replication_check.csv shows how far it is from the existing model.',
+           *[f"- Added to this run directory on {e['added']} (code {e['git'].get('commit')}): "
+             f"{', '.join(e['variants'])}. Trained on the same stored simulations as the other new models; all "
+             'rows were scored again together.' for e in cfg.get('extensions', [])],
            '- "Fixed beta + utility threshold" uses the existing threshold_utility.json, calibrated on an earlier '
            'simulation of the utility-validation runs. Every other utility threshold here was calibrated on this '
            "run's utility-validation simulations (same configs and seeds).",
@@ -203,7 +216,7 @@ def build(cfg):
            'beta = 0.01 run weighs most in mean IGR^2.',
            '- Pooled beta vs fixed beta differ in training data (14 vs 9 configs), in the validation rows and in the '
            'global z-score (whole dataset vs optimization rows), not only in the betas seen.',
-           '- The unscaled model still gets one global z-score fitted on its optimization rows (fixed constants, the '
+           '- The unscaled models still get one global z-score fitted on their optimization rows (fixed constants, the '
            'same for every run); only the per-run median/IQR step is removed.',
            '- HST_Server has no APA: it is listed under MGA-A only.',
            *[f'- {name} {P}: the pooled-beta checkpoints and their global z-score are read from {d} (models '

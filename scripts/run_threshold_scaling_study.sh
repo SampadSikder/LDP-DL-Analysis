@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 # Threshold and scaling study on the lab server (method: attacker_detector/threshold_scaling_study.py).
 #   1. pooled-beta checkpoints (reused) with a utility-selected threshold
-#   2. fixed beta: four features (control), three features, three features without per-run median/IQR
+#   2. fixed beta: four features (control), three features, three features without per-run median/IQR,
+#      four features without per-run median/IQR (excess_share kept)
 #   3. every model and threshold scored on the same simulated held-out users -> comparison tables
 #
 #   bash scripts/run_threshold_scaling_study.sh all           # foreground; stage progress is printed and logged
 #   tail -3 results/threshold_scaling_study_runs.log          # the run directory of this invocation (or why it did not start)
 #   tail -f <run directory>/logs/*_shard*.log                 # per-run and per-model progress (second terminal)
 #
-# Every invocation writes to a NEW directory results/<RUN_NAME> (default
-# threshold_and_scaling_study_<date>_<time>) and stops if it exists. Existing result folders are only read.
+# Every invocation writes to a NEW directory results/<RUN_NAME> (default threshold_and_scaling_study; no
+# timestamp) and stops if it exists: give a later invocation another RUN_NAME. Existing result folders are only read.
 # An interrupted invocation is continued with RESUME=<its run directory> and the remaining stages
 # (finished runs, models and thresholds are skipped):
-#   RESUME=results/threshold_and_scaling_study_... bash scripts/run_threshold_scaling_study.sh simulate train select score table pack
+#   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh simulate train select score table pack
+# A model variant added to the code later is added to a finished run directory with the extend stage: only
+# its models are trained (42 for both roots), every model is scored again, tables and the tarball are redone:
+#   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh extend train select score table pack
 #
 # Stages (`all` = check init plan simulate train select score table pack):
 #   check     unit tests of the study, of the fixed-beta variant and of IGR (CPU, a few minutes)
 #   init      create the run directory; find and verify the reused checkpoints (sha256 against
 #             scripts/threshold_scaling_study/reference/reused.json); nothing is created if one is missing
+#   extend    (RESUME only) add the trained variants the run directory does not have yet (VARIANTS limits
+#             them); stops if a simulated run is missing
 #   plan      runs to simulate per root, role and protocol
 #   simulate  every training-source, validation, utility-validation and held-out run, once (966 runs for
 #             both roots); SHARDS processes x PROC threads; Diffstats is flagged on the held-out runs
-#   train     the three fixed-beta feature variants, one model per root, protocol, dataset and kind
-#             (126 models for both roots); JOBS processes on the GPUs in GPUS
+#   train     the fixed-beta feature variants, one model per root, protocol, dataset and kind
+#             (42 models per variant for both roots); JOBS processes on the GPUs in GPUS
 #   select    utility threshold (mean IGR^2 on utility-validation runs) of the pooled checkpoints and of the
 #             new models
 #   score     every model at every threshold on the held-out runs
@@ -31,7 +37,8 @@
 #
 # Env: PY, GPUS (default "2"), JOBS (default 4), SHARDS (default 8), PROC (default 4),
 #      ROOTS (default "oat_v3_n500k oat_apa_n500k"), BASELINES (default "diffstats"; "diffstats fiad" adds
-#      FIAD on the held-out runs, slow), RUN_NAME, RESUME, SKIP_TESTS=1. Tests only: STUDY_RESULTS, STUDY_CONFIG.
+#      FIAD on the held-out runs, slow), RUN_NAME, RESUME, VARIANTS (extend), SKIP_TESTS=1.
+#      Tests only: STUDY_RESULTS, STUDY_CONFIG.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -50,20 +57,21 @@ say () { echo "[$(date '+%F %T')] $*"; }
 study () { "$PY" -m attacker_detector.threshold_scaling_study "$@" --run-dir "$RUN_DIR"; }
 
 STAGES=("$@")
-(( ${#STAGES[@]} )) || { sed -n '2,36p' "$0"; exit 1; }
+(( ${#STAGES[@]} )) || { sed -n '2,41p' "$0"; exit 1; }
 if [[ -n ${RESUME:-} ]]; then
   RUN_DIR=${RESUME%/}
   [[ -f $RUN_DIR/study_config.json ]] || { echo "RESUME=$RUN_DIR is not a run directory of this study"; exit 1; }
   [[ ${STAGES[*]} == all ]] && STAGES=(plan simulate train select score table pack)
   for s in "${STAGES[@]}"; do [[ $s == init ]] && { echo "init creates a new directory; drop it when resuming"; exit 1; }; done
 else
-  RUN_DIR=$RES/${RUN_NAME:-threshold_and_scaling_study_$(date +%Y%m%d_%H%M%S)}
+  RUN_DIR=$RES/${RUN_NAME:-threshold_and_scaling_study}
   [[ -e $RUN_DIR ]] && { echo "$RUN_DIR already exists; choose another RUN_NAME or continue it with RESUME=$RUN_DIR"; exit 1; }
   [[ ${STAGES[*]} == all ]] && STAGES=(check init plan simulate train select score table pack)
   [[ " ${STAGES[*]} " == *" init "* ]] || { echo "a new invocation needs the init stage (or RESUME=<run directory>)"; exit 1; }
+  [[ " ${STAGES[*]} " == *" extend "* ]] && { echo "extend adds to an existing run directory: RESUME=<run directory>"; exit 1; }
 fi
 for s in "${STAGES[@]}"; do
-  case $s in check|init|plan|simulate|train|select|score|table|pack) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
+  case $s in check|init|extend|plan|simulate|train|select|score|table|pack) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
 done
 TARBALL=$RES/$(basename "$RUN_DIR").tar.gz
 
@@ -83,6 +91,9 @@ stage_init () {
   study init --results "$RES" ${ROOTS:+--roots $ROOTS} ${STUDY_CONFIG:+--config $STUDY_CONFIG} --baselines $BASELINES || return 1
   echo "$(date '+%F %T') run directory: $RUN_DIR" >> "$RUNS_LOG"
 }
+
+# shellcheck disable=SC2086
+stage_extend () { study extend ${VARIANTS:+--variants $VARIANTS}; }
 
 stage_plan () { study plan; }
 
