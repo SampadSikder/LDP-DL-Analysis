@@ -9,6 +9,9 @@ a run is on the same simulated users) and writes <run dir>/comparison/:
   side_by_side/replication_check_pooled.csv        the same for the retrained pooled-beta control
   side_by_side/limitations.md                      what differs between rows besides the named change
   in_dist/, cross/sweep_<parameter>.csv            the same metrics along each sweep (data of the figures)
+  hyperparameters/                                 the small hyperparameter test: the unscaled four-feature
+                                                   models with other training settings next to the usual ones,
+                                                   on the cells the test models were trained on only
 Metrics are means over the held-out runs of a row (per-run F1, recall, precision, false-positive rate,
 signed IGR and IGR^2); n_runs says how many.
 """
@@ -79,12 +82,27 @@ PAIRS = [
     ('training on every beta instead of the source beta (four features unscaled, validation-F1 threshold)',
      'Fixed beta, 4 features unscaled + fixed threshold', 'Pooled beta, 4 features unscaled + validation-F1 threshold'),
 ]
+# small hyperparameter test (threshold_scaling_study.HP_TESTS): compared on its own cells only, so these
+# labels are kept out of the tables above
+HP_TESTS = [('dropout01_batch64', 'dropout 0.1, batch 64'), ('token128', 'token size 128')]
+HP_VARIANTS, HP_PAIRS = [], []
+for _base, _model, _rules in (
+        ('Fixed beta, 4 features unscaled', 'fixed_beta_4f_unscaled', (('fixed threshold', 'f1'), ('utility threshold', 'utility'))),
+        ('Pooled beta, 4 features unscaled', 'pooled_beta_4f_unscaled', (('fixed threshold', 'fixed_p0.5'), ('utility threshold', 'utility')))):
+    for _thr, _rule in _rules:
+        HP_VARIANTS.append((f'{_base} + {_thr}', _model, _rule))
+        for _key, _text in HP_TESTS:
+            HP_VARIANTS.append((f'{_base}, {_text} + {_thr}', f'{_model}_{_key}', _rule))
+            HP_PAIRS.append((f'{_text} instead of the usual settings ({_base}, {_thr})', f'{_base} + {_thr}',
+                             f'{_base}, {_text} + {_thr}'))
+HP_VARIANTS += [('Diffstats', 'diffstats', ''), ('No removal', 'no_defense', ''), ('Perfect removal', 'oracle', '')]
 METRICS = ['f1', 'recall', 'precision', 'fpr', 'igr', 'igr2']
 F1_TOL, IGR2_REL, IGR2_ABS = 0.01, 0.10, 0.001      # what counts as a change in the verdicts
 GROUP = ['attack', 'kind', 'protocol']
 
 
-def load(cfg):
+def load(cfg, variants=None):
+    variants = VARIANTS if variants is None else variants
     frames = []
     for root in cfg['roots']:
         files = sorted(glob.glob(os.path.join(cfg['run_dir'], 'scores', root, 'cells', '*.csv')))
@@ -98,7 +116,7 @@ def load(cfg):
     df = pd.concat(frames, ignore_index=True)
     both = df[df.kind == 'both']           # no removal, perfect removal, baselines: the same for both kinds
     df = pd.concat([df[df.kind != 'both']] + [both.assign(kind=k) for k in ('in_dist', 'cross')], ignore_index=True)
-    label = {(m, r): lab for lab, m, r in VARIANTS}
+    label = {(m, r): lab for lab, m, r in variants}
     df['variant'] = [label.get((m, r if isinstance(r, str) else '')) for m, r in zip(df.model, df.threshold_rule)]
     df = df[df.variant.notna()].copy()
     for c in METRICS + ['epsilon', 'attacker_ratio']:
@@ -106,7 +124,7 @@ def load(cfg):
     return df
 
 
-def aggregate(df, by):
+def aggregate(df, by, variants=None):
     g = df.groupby(GROUP + by + ['variant'], sort=False)
     out = g[METRICS].mean().join(g.size().rename('n_runs')).reset_index()
     # a run where a cut-off flags every user has no IGR; it must not vanish from the mean
@@ -116,7 +134,7 @@ def aggregate(df, by):
     none = out[out.variant == 'No removal'][GROUP + by + ['igr', 'igr2']].rename(
         columns={'igr': 'no_removal_igr', 'igr2': 'no_removal_igr2'})
     out = out.merge(none, on=GROUP + by, how='left')
-    order = {v[0]: i for i, v in enumerate(VARIANTS)}
+    order = {v[0]: i for i, v in enumerate(VARIANTS if variants is None else variants)}
     out['_o'] = out.variant.map(order)
     return out.sort_values(GROUP + by + ['_o']).drop(columns='_o').reset_index(drop=True)
 
@@ -132,10 +150,10 @@ def _verdict(b, a):
     return f1, util, both
 
 
-def paired(tab, by):
+def paired(tab, by, pairs=None):
     rows = []
     key = GROUP + by
-    for what, before, after in PAIRS:
+    for what, before, after in (PAIRS if pairs is None else pairs):
         b = tab[tab.variant == before].set_index(key)
         a = tab[tab.variant == after].set_index(key)
         for k in b.index.intersection(a.index):
@@ -154,6 +172,37 @@ def _md(df, cols):
     lines = ['| ' + ' | '.join(cols) + ' |', '|' + '---|' * len(cols)]
     lines += ['| ' + ' | '.join(fmt(v) for v in r) + ' |' for r in df[cols].itertuples(index=False)]
     return '\n'.join(lines)
+
+
+def hyperparameters(cfg, out):
+    """Tables of the small hyperparameter test: every row on the cells (root, protocol, dataset, kind) the
+    test models were trained on, so a test model and its usual-settings partner average the same runs."""
+    df = load(cfg, HP_VARIANTS).rename(columns={'attacker_ratio': 'test_beta'})
+    tested = df[df.model.str.endswith(tuple(k for k, _ in HP_TESTS))]
+    if tested.empty:
+        return None
+    cells = tested[['root', 'protocol', 'dataset_type', 'kind']].drop_duplicates()
+    df = df.merge(cells, on=list(cells.columns))
+    os.makedirs(out, exist_ok=True)
+    res = {}
+    for name, by in (('overall', ['dataset_type']), ('by_test_beta', ['dataset_type', 'test_beta'])):
+        tab = aggregate(df, by, HP_VARIANTS)
+        tab.to_csv(os.path.join(out, f'{name}.csv'), index=False)
+        res[name] = paired(tab, by, HP_PAIRS)
+        res[name].to_csv(os.path.join(out, f'paired_{name}.csv'), index=False)
+    pc = res['overall']
+    md = ['# Hyperparameter test', '',
+          'The unscaled four-feature models trained again with other settings, next to the same model with the '
+          'usual ones (dropout 0.2, batch size 256, token size 64). Means over all held-out runs of the dataset '
+          f'(n_runs), in-distribution models. Cells: {len(cells)} (' + ', '.join(
+              sorted({f'{r.root} {r.protocol} {r.dataset_type}' for r in cells.itertuples()})) + '). One model and '
+          'one seed per cell: differences of the size of the replication check are not evidence.', '']
+    for what, g in pc.groupby('comparison', sort=False):
+        md += [f'## {what}', '', _md(g, ['attack', 'protocol', 'dataset_type', 'n_runs', 'f1_before', 'f1_after',
+                                        'igr2_before', 'igr2_after', 'fpr_before', 'fpr_after', 'helped']), '']
+    with open(os.path.join(out, 'hyperparameters.md'), 'w') as f:
+        f.write('\n'.join(md) + '\n')
+    return pc
 
 
 def build(cfg):
@@ -275,4 +324,7 @@ def build(cfg):
     print(f'table: {len(df):,} scored rows -> {out}')
     if len(pc):
         print(pc.groupby(['comparison', 'helped']).size().unstack(fill_value=0).to_string())
+    hp = hyperparameters(cfg, os.path.join(out, 'hyperparameters'))
+    if hp is not None and len(hp):
+        print(hp[['comparison', 'attack', 'protocol', 'f1_before', 'f1_after', 'igr2_before', 'igr2_after']].to_string(index=False))
     return 0

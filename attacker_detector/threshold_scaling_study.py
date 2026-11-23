@@ -22,6 +22,9 @@ Two experiments, scored together on the same simulated held-out users:
      pooled_beta__four_features_unscaled         the same three before the per-run median/IQR + excess_share
    They are scored at p > 0.5 (the reused pooled model's fixed rule), at their F1-selected threshold and
    at utility thresholds calibrated at the source beta and on every config.
+4. A small hyperparameter test (HP_TESTS): the two four-feature unscaled models trained again with
+   dropout 0.1 and batch size 64, and with token size 128, on one dataset and two protocols only
+   (HP_SCOPE), in-distribution, next to the same model with the usual settings.
 
 The server no longer holds the main-sweep datasets, and datasets never stored reports. So every run the
 study needs is simulated once from the saved design (attacker_detector/igr.simulate, seeded like the
@@ -86,7 +89,20 @@ TRAINED = {
         'per_run_scaling': 'none on block_projection, block_overlap, one_deviation (extractor values as they '
                            'are); excess_share as in the four-feature models (it never had the median/IQR step)'},
 }
+# small hyperparameter test: the two four-feature unscaled models with other training settings, on a few
+# cells only ('train' overrides TRAIN, 'scope' limits the cells a variant is trained and scored on)
+HP_SCOPE = {'protocols': ['OUE', 'OLH_Server'], 'datasets': ['zipf'], 'kinds': ['in_dist']}
+HP_TESTS = {'dropout01_batch64': {'dropout': 0.1, 'batch_size': 64}, 'token128': {'d_token': 128}}
+for _base in ('fixed_beta__four_features_unscaled', 'pooled_beta__four_features_unscaled'):
+    for _name, _hp in HP_TESTS.items():
+        TRAINED[f'{_base}__{_name}'] = {**TRAINED[_base], 'model': f"{TRAINED[_base]['model']}_{_name}",
+                                        'train': dict(_hp), 'scope': HP_SCOPE, 'base_variant': _base}
 ALL_BETA_DIR = 'all_beta_calibration'      # second utility threshold of a pooled model trained here
+
+
+def in_scope(spec, protocol, dataset, kind):
+    s = spec.get('scope')
+    return not s or (protocol in s['protocols'] and dataset in s['datasets'] and kind in s['kinds'])
 
 
 def pooled_training(cfg):
@@ -135,12 +151,16 @@ def train_datasets(kind, dataset):
 
 class StudyRun(ut.UtilityRun):
     """UtilityRun (v3 features, labels, each user's summed report on the targets) plus the three block /
-    count features before the per-run median/IQR and, on held-out runs, the baselines' flags."""
+    count features before the per-run median/IQR and, on held-out runs, the baselines' flags.
+    targets (runs simulated since the MSE study; None on older files): each user's support bit on every
+    target item, {'bits': (n, r) bool, 'lo', 'hi', 'true': (r,) genuine frequencies}; the support value of a
+    bit is lo or hi (attacker_detector.igr.Support). This is what a per-item error on the targets needs."""
 
-    def __init__(self, run, feats, labels, target_sum, A, B, true_t, raw3, flags=None):
+    def __init__(self, run, feats, labels, target_sum, A, B, true_t, raw3, flags=None, targets=None):
         super().__init__(run, feats, labels, target_sum, A, B, true_t)
         self.raw3 = np.asarray(raw3, dtype=np.float64)
         self.flags = dict(flags or {})
+        self.targets = targets
 
     def save(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -148,6 +168,9 @@ class StudyRun(ut.UtilityRun):
         np.savez(tmp, feats=self.feats.astype(np.float32), raw3=self.raw3.astype(np.float32),
                  labels=self.labels, target_sum=self.target_sum, A=self.A, B=self.B, true_t=self.true_t,
                  run=json.dumps(self.run, default=refbeta._jsonable),
+                 **({} if self.targets is None else {
+                     'target_bits': np.packbits(self.targets['bits'], axis=1), 'target_lo': self.targets['lo'],
+                     'target_hi': self.targets['hi'], 'target_true': self.targets['true']}),
                  **{f'flag_{k}': np.packbits(np.asarray(v, dtype=bool)) for k, v in self.flags.items()})
         os.replace(tmp, path)
 
@@ -156,8 +179,13 @@ class StudyRun(ut.UtilityRun):
         with np.load(path, allow_pickle=False) as z:
             n = len(z['labels'])
             flags = {k[5:]: np.unpackbits(z[k], count=n).astype(bool) for k in z.files if k.startswith('flag_')}
+            targets = None
+            if 'target_bits' in z.files:
+                true = z['target_true'].astype(np.float64)
+                targets = {'bits': np.unpackbits(z['target_bits'], axis=1, count=len(true)).astype(bool),
+                           'lo': float(z['target_lo']), 'hi': float(z['target_hi']), 'true': true}
             return cls(json.loads(str(z['run'])), z['feats'].astype(np.float64), z['labels'], z['target_sum'],
-                       float(z['A']), float(z['B']), float(z['true_t']), z['raw3'].astype(np.float64), flags)
+                       float(z['A']), float(z['B']), float(z['true_t']), z['raw3'].astype(np.float64), flags, targets)
 
     def inputs(self, source, features):
         """Model input columns. 'raw': the three block / count features before the per-run median/IQR;
@@ -199,6 +227,8 @@ def simulate_run(run, design, processors=4, baselines=()):
     if dev > 1e-6:
         raise RuntimeError(f'estimator does not reproduce the generator estimate (rel. dev {dev:.2e})')
     u = ut.UtilityRun.from_rundata(rd)
+    per_target = {'bits': sup.bits[:, rd.targets], 'lo': sup.lo, 'hi': sup.hi,
+                  'true': rd.f_true[rd.targets].astype(np.float64)}
     flags = {}
     if baselines:
         from .baselines import BASELINES
@@ -209,7 +239,7 @@ def simulate_run(run, design, processors=4, baselines=()):
                 flags[m] = mask
             except Exception as e:          # e.g. the upstream Diffstats bin crash: keep the run, no row
                 say(f'    [WARN] {m} failed on {igr.run_tag(run)}: {e}')
-    return StudyRun(run, feats, labels, u.target_sum, u.A, u.B, u.true_t, raw3, flags)
+    return StudyRun(run, feats, labels, u.target_sum, u.A, u.B, u.true_t, raw3, flags, per_target)
 
 
 # ------------------------------------------------------------------------------------------
@@ -392,8 +422,8 @@ def cmd_extend(args):
     cfg.setdefault('extensions', []).append({'added': time.strftime('%F %T'), 'variants': new, 'git': _git(),
                                              'command': ' '.join(sys.argv)})
     refbeta._write_json(os.path.join(args.run_dir, MARKER), {k: v for k, v in cfg.items() if k != 'run_dir'})
-    n = sum(len(rc['protocols']) for rc in cfg['roots'].values()) * len(DATASETS) * 2
-    say(f'extend: added {new} ({n} models each) to {args.run_dir}')
+    jobs = pd.Series([j[0] for j in train_jobs(cfg)]).value_counts()
+    say(f'extend: added to {args.run_dir}: ' + ', '.join(f'{v} ({int(jobs.get(v, 0))} models)' for v in new))
     todo = sum(not os.path.exists(run_path(cfg, r)) for r in plan(cfg))
     if todo:
         say(f'extend: {todo} more runs to simulate (training and validation runs at the other betas); run the '
@@ -480,7 +510,11 @@ def cmd_plan(args):
 
 def cmd_simulate(args):
     cfg = load_cfg(args.run_dir)
-    runs = plan(cfg)
+    return simulate_runs(cfg, plan(cfg), args)
+
+
+def simulate_runs(cfg, runs, args):
+    """Simulate and store the runs of this shard that are not stored yet (shared with the MSE study)."""
     mine = runs[args.shard::args.num_shards]
     say(f'simulate shard {args.shard}/{args.num_shards}: {len(mine)} of {len(runs)} runs')
     designs, failed = {}, 0
@@ -531,15 +565,16 @@ def _stack(runs, spec):
 
 
 def train_jobs(cfg):
-    return [(v, root, P, kind, D) for v in cfg['trained_variants'] for root, rc in cfg['roots'].items()
-            for P in rc['protocols'] for D in DATASETS for kind in ('in_dist', 'cross')]
+    return [(v, root, P, kind, D) for v, spec in cfg['trained_variants'].items() for root, rc in cfg['roots'].items()
+            for P in rc['protocols'] for D in DATASETS for kind in ('in_dist', 'cross') if in_scope(spec, P, D, kind)]
 
 
 def train_model(cfg, variant, root, protocol, kind, dataset, device):
     import torch
     from .models import FT_TRANSFORMER_HP_KEYS, get_model
     from .training import Trainer
-    spec, hp, rc = cfg['trained_variants'][variant], cfg['train'], cfg['roots'][root]
+    spec, rc = cfg['trained_variants'][variant], cfg['roots'][root]
+    hp = {**cfg['train'], **spec.get('train', {})}
     out = variant_dir(cfg, variant, root, kind, dataset, protocol)
     vpath = os.path.join(out, 'variant.json')
     if os.path.exists(vpath) and _read(vpath).get('status') == 'complete':
@@ -687,6 +722,7 @@ def detectors(cfg, root, protocol, kind, dataset):
                                                   _thr(os.path.join(d, ALL_BETA_DIR), 'threshold_utility.json'))]
         out.append({'model': spec['model'], 'variant': variant, 'dir': d, 'source': spec['source'],
                     'features': spec['features'], 'norm': refbeta.load_scaler(d), 'pooled_training': pooled,
+                    'ft_spec': {**igr.FT_SPEC, **{k: v for k, v in spec.get('train', {}).items() if k in igr.FT_SPEC}},
                     'thresholds': {k: v for k, v in thr if v is not None}})
     return out
 
@@ -702,7 +738,7 @@ class Scorer:
         if path not in self._m:
             import torch
             ck = torch.load(path, map_location='cpu')
-            self._m[path] = (igr.build_ft(len(det['features']), igr.FT_SPEC,
+            self._m[path] = (igr.build_ft(len(det['features']), det.get('ft_spec', igr.FT_SPEC),
                                           ck['model_state_dict'] if 'model_state_dict' in ck else ck, self.device),
                              refbeta.file_sha256(path))
         model, _ = self._m[path]

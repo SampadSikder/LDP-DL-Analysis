@@ -23,6 +23,7 @@ N, ROOT_NAME, P = 3000, 'mini', 'OUE'
 FIRST = list(st.TRAINED)[:3]                    # what the run directory starts with
 ADDED = 'fixed_beta__four_features_unscaled'    # added to the finished run directory by `extend`
 POOLED = ['pooled_beta__four_features_scaled__control', 'pooled_beta__four_features_unscaled']   # added too
+HP = [v for v, spec in st.TRAINED.items() if 'scope' in spec]      # the small hyperparameter test, added too
 
 
 def _design():
@@ -153,9 +154,46 @@ class StudyPipeline(unittest.TestCase):
         np.testing.assert_array_equal(mixed[:, :3], u.raw3)
         np.testing.assert_array_equal(mixed[:, 3], u.feats[:, 3])
         self.assertIn('diffstats', u.flags)
+        # per-target support: its row sums are the summed report IGR uses
+        t = u.targets
+        self.assertEqual(t['bits'].shape, (N, 10))
+        np.testing.assert_allclose((t['lo'] + (t['hi'] - t['lo']) * t['bits']).sum(axis=1), u.target_sum)
+        self.assertAlmostEqual(float(t['true'].sum()), u.true_t, places=12)
+
+    def test_hyperparameter_test_variants(self):
+        self.assertEqual(len(HP), 4)
+        for variant in HP:
+            spec = st.TRAINED[variant]
+            d = st.variant_dir(self.cfg, variant, ROOT_NAME, 'in_dist', 'zipf', P)
+            hp = st._read(os.path.join(d, 'variant.json'))['identity']['hyperparameters']
+            want = {**self.cfg['train'], **spec['train']}
+            self.assertEqual((hp['dropout'], hp['batch_size'], hp['d_token']),
+                             (want['dropout'], want['batch_size'], want['d_token']))
+            # one dataset, in-distribution only; the usual-settings partner sees the same rows
+            self.assertFalse(os.path.exists(st.variant_dir(self.cfg, variant, ROOT_NAME, 'cross', 'zipf', P)))
+            self.assertFalse(os.path.exists(st.variant_dir(self.cfg, variant, ROOT_NAME, 'in_dist', 'fire', P)))
+            a, b = (st._read(os.path.join(st.variant_dir(self.cfg, v, ROOT_NAME, 'in_dist', 'zipf', P),
+                                          'split_manifest.json'))['eligible_configs'] for v in (variant, spec['base_variant']))
+            self.assertEqual(a, b)
+            det = next(x for x in st.detectors(self.cfg, ROOT_NAME, P, 'in_dist', 'zipf') if x.get('variant') == variant)
+            self.assertEqual(det['ft_spec']['d_token'], want['d_token'])
+            u = st.load_runs(self.cfg, ROOT_NAME, 'heldout_test', P, ['zipf'])[0]
+            self.assertEqual(st.Scorer(torch.device('cpu')).logits(det, u).shape, (N,))     # the checkpoint loads
+        self.assertEqual({st.TRAINED[v]['train'].get('d_token') for v in HP}, {None, 128})
+        self.assertEqual({st.TRAINED[v]['train'].get('batch_size') for v in HP}, {None, 64})
+        hp_dir = os.path.join(self.run_dir, 'comparison', 'hyperparameters')
+        pc = pd.read_csv(os.path.join(hp_dir, 'paired_overall.csv'))
+        self.assertEqual(len(pc), len(tb.HP_PAIRS))            # one cell here: OUE, zipf, in-distribution
+        self.assertEqual(set(pc.dataset_type), {'zipf'})
+        self.assertEqual(set(pc.kind), {'in_dist'})
+        self.assertTrue((pc.n_runs == 3).all())
+        for f in ('overall.csv', 'by_test_beta.csv', 'paired_by_test_beta.csv', 'hyperparameters.md'):
+            self.assertTrue(os.path.exists(os.path.join(hp_dir, f)), f)
 
     def test_trained_variants(self):
         for variant, spec in st.TRAINED.items():
+            if 'scope' in spec:
+                continue
             for kind, n_cfg in (('in_dist', 2), ('cross', 4)):
                 d = st.variant_dir(self.cfg, variant, ROOT_NAME, kind, 'fire', P)
                 man = st._read(os.path.join(d, 'split_manifest.json'))
@@ -176,8 +214,8 @@ class StudyPipeline(unittest.TestCase):
         self.assertEqual(a, b)
 
     def test_extend_adds_a_variant_and_keeps_what_was_finished(self):
-        self.assertEqual(list(self.cfg['trained_variants']), FIRST + [ADDED] + POOLED)
-        self.assertEqual([e['variants'] for e in self.cfg['extensions']], [[ADDED] + POOLED])
+        self.assertEqual(list(self.cfg['trained_variants']), FIRST + [ADDED] + POOLED + HP)
+        self.assertEqual([e['variants'] for e in self.cfg['extensions']], [[ADDED] + POOLED + HP])
         now = dict((p, (s, m)) for p, s, m in self._listing(os.path.join(self.run_dir, 'variants')))
         for p, size, mtime in self.first_models:           # no finished model or threshold was written again
             self.assertEqual(now[p], (size, mtime), p)
@@ -192,11 +230,14 @@ class StudyPipeline(unittest.TestCase):
         # the rows scored before the extension come out the same; the new model's rows are added
         df = pd.read_csv(os.path.join(self.run_dir, 'scores', ROOT_NAME, 'scored_runs.csv'), keep_default_na=False)
         key = ['dataset_type', 'epsilon', 'attacker_ratio', 'kind', 'model', 'threshold_rule']
-        new = df.model.isin(['fixed_beta_4f_unscaled', 'pooled_beta_4f_scaled_control', 'pooled_beta_4f_unscaled'])
+        new = df.model.isin(['fixed_beta_4f_unscaled', 'pooled_beta_4f_scaled_control', 'pooled_beta_4f_unscaled']
+                            + [st.TRAINED[v]['model'] for v in HP])
         old = df[~new].sort_values(key).reset_index(drop=True)
         pd.testing.assert_frame_equal(old, self.first_scores.sort_values(key).reset_index(drop=True))
         # runs x kinds x threshold rules: fixed beta 2; each pooled model p > 0.5, F1, utility, utility all-beta
-        self.assertEqual(len(df) - len(old), 9 * 2 * (2 + 2 * 4))
+        # plus the hyperparameter test on the 3 zipf runs, in-distribution: 2 fixed-beta models x 2 rules and
+        # 2 pooled-beta models x 4 rules
+        self.assertEqual(len(df) - len(old), 9 * 2 * (2 + 2 * 4) + 3 * (2 * 2 + 2 * 4))
         self.assertEqual(set(df[df.model == 'pooled_beta_4f_unscaled'].threshold_rule),
                          {'fixed_p0.5', 'f1', 'utility', 'utility_all_beta'})
         rec = st._read(os.path.join(st.variant_dir(self.cfg, POOLED[1], ROOT_NAME, 'cross', 'fire', P),
@@ -234,7 +275,10 @@ class StudyPipeline(unittest.TestCase):
         per_run = df.groupby(['dataset_type', 'epsilon', 'attacker_ratio']).size()
         self.assertEqual(len(per_run), 9)
         # 3 reference rows + 2 kinds x (pooled 4 rules + existing 2 + 4 fixed-beta trained x 2 + 2 pooled trained x 4)
-        self.assertTrue((per_run == 3 + 2 * 22).all())
+        # zipf runs also carry the 12 rows of the hyperparameter test
+        zipf = per_run.index.get_level_values('dataset_type') == 'zipf'
+        self.assertTrue((per_run[~zipf] == 3 + 2 * 22).all())
+        self.assertTrue((per_run[zipf] == 3 + 2 * 22 + 12).all())
         u = st.load_runs(self.cfg, ROOT_NAME, 'heldout_test', P, ['zipf'])[0]
         row = df[(df.dataset_type == 'zipf') & (df.model == 'oracle') & (df.seed == u.run['seed'])].iloc[0]
         self.assertEqual(int(row.TP), int(u.labels.sum()))

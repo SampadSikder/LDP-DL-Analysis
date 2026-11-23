@@ -4,6 +4,8 @@
 #   2. fixed beta: four features (control), three features, three features without per-run median/IQR,
 #      four features without per-run median/IQR (excess_share kept)
 #      pooled beta trained here: four features (control) and four features without per-run median/IQR
+#      small hyperparameter test: the two unscaled four-feature models with dropout 0.1 + batch 64 and with
+#      token size 128, on OUE and OLH-Server, zipf, in-distribution only (16 models)
 #   3. every model and threshold scored on the same simulated held-out users -> comparison tables
 #
 #   bash scripts/run_threshold_scaling_study.sh all           # foreground; stage progress is printed and logged
@@ -60,7 +62,7 @@ say () { echo "[$(date '+%F %T')] $*"; }
 study () { "$PY" -m attacker_detector.threshold_scaling_study "$@" --run-dir "$RUN_DIR"; }
 
 STAGES=("$@")
-(( ${#STAGES[@]} )) || { sed -n '2,44p' "$0"; exit 1; }
+(( ${#STAGES[@]} )) || { sed -n '2,46p' "$0"; exit 1; }
 if [[ -n ${RESUME:-} ]]; then
   RUN_DIR=${RESUME%/}
   [[ -f $RUN_DIR/study_config.json ]] || { echo "RESUME=$RUN_DIR is not a run directory of this study"; exit 1; }
