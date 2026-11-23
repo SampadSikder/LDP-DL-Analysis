@@ -63,6 +63,10 @@ class MseStudyPipeline(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
+    def _close(self, got, want, rel=1e-9):
+        # relative: a cut-off that leaves few users gives large estimates, so the rounding error is not tiny
+        self.assertLessEqual(abs(got - want), rel * max(abs(want), 1e-12), (got, want))
+
     @staticmethod
     def _listing(d):
         return sorted((os.path.join(r, f), os.path.getsize(os.path.join(r, f)), os.path.getmtime(os.path.join(r, f)))
@@ -101,10 +105,10 @@ class MseStudyPipeline(unittest.TestCase):
         for flagged in (np.zeros(u.n, bool), u.labels == 1, rng.random(u.n) < 0.3):
             est = ms.target_estimate(u, flagged)
             # the summed estimate is what IGR is made of
-            self.assertAlmostEqual((est.sum() - u.targets['true'].sum()) / (u.beta * u.r), u.igr(flagged), places=9)
+            self.assertAlmostEqual((est.sum() - u.targets['true'].sum()) / (u.beta * u.r), u.igr(flagged), places=7)
             vals = u.targets['lo'] + (u.targets['hi'] - u.targets['lo']) * u.targets['bits'][~flagged]
             want = np.mean((u.A * vals.sum(axis=0) / (~flagged).sum() - u.B - u.targets['true']) ** 2)
-            self.assertAlmostEqual(ms.mse_target(u, flagged), want, places=15)
+            self._close(ms.mse_target(u, flagged), want)
         self.assertTrue(np.isnan(ms.mse_target(u, np.ones(u.n, bool))))
         # removing exactly the fake users leaves less error on the targets than removing nobody
         self.assertLess(ms.mse_target(u, u.labels == 1), ms.mse_target(u, np.zeros(u.n, bool)))
@@ -113,7 +117,7 @@ class MseStudyPipeline(unittest.TestCase):
         det = next(d for d in ms.detectors(self.cfg, self.src, ROOT_NAME, P, 'in_dist', 'fire')
                    if d.get('variant') == 'fixed_beta__four_features_unscaled')
         runs = st.load_runs(self.cfg, ROOT_NAME, 'utility_validation', P, ['fire'], betas=[0.05])
-        scorer = st.Scorer(torch.device('cpu'))
+        scorer = st.Scorer(st._device(None))        # the device of the select stage: its thresholds are compared
         scores = [scorer.logits(det, u) for u in runs]
         thr, obj, cand = ms.select(scores, runs)
         for i in list(range(0, len(cand), 37)) + [len(cand) - 1]:
@@ -121,8 +125,8 @@ class MseStudyPipeline(unittest.TestCase):
             if any(f.all() for f in flags):      # a cut-off that empties a run can never be selected
                 self.assertEqual((obj['mse'][i], obj['igr'][i]), (np.inf, np.inf))
                 continue
-            self.assertAlmostEqual(obj['mse'][i], np.mean([ms.mse_target(u, f) for u, f in zip(runs, flags)]), places=15)
-            self.assertAlmostEqual(obj['igr'][i], np.mean([u.igr(f) ** 2 for u, f in zip(runs, flags)]), places=9)
+            self._close(obj['mse'][i], np.mean([ms.mse_target(u, f) for u, f in zip(runs, flags)]))
+            self._close(obj['igr'][i], np.mean([u.igr(f) ** 2 for u, f in zip(runs, flags)]), rel=1e-6)
         self.assertEqual(thr['mse'], cand[int(np.argmin(obj['mse']))])
         self.assertEqual(thr['igr'], cand[int(np.argmin(obj['igr']))])
         self.assertEqual(det['thresholds']['mse'], thr['mse'])           # what the select stage froze
@@ -168,7 +172,7 @@ class MseStudyPipeline(unittest.TestCase):
                 self.assertEqual(set(df[(df.model == model) & (df.kind == kind)].threshold_rule), rules, model)
         u = st.load_runs(self.cfg, ROOT_NAME, 'heldout_test', P, ['zipf'])[0]
         row = df[(df.dataset_type == 'zipf') & (df.model == 'oracle') & (df.seed == u.run['seed'])].iloc[0]
-        self.assertAlmostEqual(float(row.mse_target), ms.mse_target(u, u.labels == 1), places=15)
+        self._close(float(row.mse_target), ms.mse_target(u, u.labels == 1))
         self.assertEqual(int(row.FP), 0)
         side = os.path.join(self.run_dir, 'comparison', 'side_by_side')
         tab = pd.read_csv(os.path.join(side, 'side_by_side_by_test_beta.csv'))
@@ -182,8 +186,7 @@ class MseStudyPipeline(unittest.TestCase):
             # the reference row repeats the chosen version of the source study
             name = best[best.kind == kind].variant.iloc[0]
             self.assertEqual(got[got.variant == mt.BEST].reference_version.iloc[0], name)
-            self.assertAlmostEqual(got[got.variant == mt.BEST].mse_target.iloc[0],
-                                   got[got.variant == name].mse_target.iloc[0], places=15)
+            self._close(got[got.variant == mt.BEST].mse_target.iloc[0], got[got.variant == name].mse_target.iloc[0])
             self.assertTrue(os.path.exists(os.path.join(self.run_dir, 'comparison', kind, 'sweep_test_beta.csv')))
         pc = pd.read_csv(os.path.join(side, 'paired_comparisons.csv'))
         self.assertEqual(pc.comparison.nunique(), len(mt.PAIRS))

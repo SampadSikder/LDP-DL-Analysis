@@ -68,12 +68,18 @@ for s in "${STAGES[@]}"; do
 done
 TARBALL=$RES/$(basename "$RUN_DIR").tar.gz
 
+failures () {   # the failed tests of a unittest log with their tracebacks (they stand before the stages' own
+                # output, so the end of the log does not show them); the end of the log if there are none
+  awk '/^(FAIL|ERROR): /{p=1} /^Ran /{p=0} p' "$1" | grep . || tail -40 "$1"
+  grep -h "^Ran\|^FAILED" "$1"
+}
+
 stage_check () {
   [[ ${SKIP_TESTS:-0} == 1 ]] && { say "check: skipped (SKIP_TESTS=1)"; return 0; }
   local t log; log=$(mktemp)
   for t in tests/mse_threshold tests/igr; do
     say "check: $t"
-    "$PY" -m unittest discover -s "$t" -t . > "$log" 2>&1 || { tail -40 "$log"; say "tests FAILED ($t)"; return 1; }
+    CUDA_VISIBLE_DEVICES=${GPU_LIST[0]:-} "$PY" -m unittest discover -s "$t" -t . > "$log" 2>&1 || { failures "$log"; say "tests FAILED ($t)"; return 1; }
     grep -h "^Ran\|^OK" "$log"
   done
   rm -f "$log"
