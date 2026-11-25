@@ -290,11 +290,17 @@ class StudyPipeline(unittest.TestCase):
         o = rows[rows.model == 'oracle']
         self.assertTrue((o.FP == 0).all() and (o.FN == 0).all())
         self.assertTrue((rows[rows.model == 'no_defense'].flagged == 0).all())
-        # the same true items and targets as the study's simulation of the run, other LDP noise
+        # the same design and seed as the study's simulation of the run: the same users are fake and the
+        # attack is present in both. Whether the LDP noise comes out identical depends on how the
+        # generator's worker processes inherit the seeded RNG state, so the two IGR values may be equal
+        # (they are on Linux) or differ; the table stage measures the difference and says which it was.
         u = st.load_runs(self.cfg, ROOT_NAME, 'heldout_test', P, ['zipf'])[0]
         mine = rows[(rows.seed == u.run['seed']) & (rows.model == 'oracle')].iloc[0]
         self.assertEqual(int(mine.TP), int(u.labels.sum()))
-        self.assertNotEqual(float(mine.igr), u.igr(u.labels == 1))
+        self.assertTrue(np.isfinite(float(mine.igr)))
+        none_row = rows[(rows.seed == u.run['seed']) & (rows.model == 'no_defense')].iloc[0]
+        self.assertGreater(float(none_row.igr), 0)
+        self.assertGreater(u.igr(np.zeros(u.n, dtype=bool)), 0)
         # a finished run is skipped
         before = self._listing(os.path.join(self.run_dir, 'baseline_runs', ROOT_NAME))
         self.assertEqual(st.main(['baselines', '--methods', 'fiad'] + self.base), 0)

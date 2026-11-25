@@ -236,19 +236,28 @@ def baseline_check(cfg, side):
         j[f'{c}_diff'] = pd.to_numeric(j[f'{c}_resimulated'], errors='coerce') - pd.to_numeric(j[f'{c}_study'], errors='coerce')
     j.to_csv(os.path.join(side, 'baseline_resimulation_check.csv'), index=False)
     added = sorted(set(extra.model) - set(main.model))
+    same = j[j.model.isin(['no_defense', 'oracle'])]
+    identical = len(same) > 0 and bool((same.igr_diff.abs() < 1e-12).all()) and bool((same.f1_diff.abs() < 1e-12).all())
     lines = [f"- {', '.join(added) or 'No baseline'} was added after the simulation: the report matrix of a stored "
              'run is not kept, so each held-out run was simulated again for it (same design and seed: same true '
-             f'items and targets; fresh LDP noise; {extra.seed.nunique()} runs). Its rows are measured on that '
-             'simulation, every other row on the study\'s own. In the tables its "no removal" reference is the '
-             'study\'s own simulation.']
-    none = j[j.model == 'no_defense']
-    if len(none):
-        lines.append(f'- The two simulations of a run, without removal: |IGR difference| has median '
-                     f'{none.igr_diff.abs().median():.3f} and maximum {none.igr_diff.abs().max():.3f} over {len(none)} '
-                     'runs (baseline_resimulation_check.csv).')
+             f'items, same target set, same users fake; {extra.seed.nunique()} runs).']
+    if identical:
+        lines.append('- The second simulation reproduced the stored runs exactly: no removal and perfect removal '
+                     'give the same numbers on both (|difference| below 1e-12 on every run, '
+                     'baseline_resimulation_check.csv). The rows added here are therefore on the same reports as '
+                     'every other row of the tables.')
+    else:
+        lines.append("- The LDP noise was drawn again, so the rows added here are on the same users but not on the "
+                     "same reports as the rest of the tables; their \"no removal\" reference in the tables is the "
+                     "study's own simulation.")
+        none = j[j.model == 'no_defense']
+        if len(none):
+            lines.append(f'- The two simulations of a run, without removal: |IGR difference| has median '
+                         f'{none.igr_diff.abs().median():.3f} and maximum {none.igr_diff.abs().max():.3f} over '
+                         f'{len(none)} runs (baseline_resimulation_check.csv).')
     for m in sorted(set(j.model) - {'no_defense', 'oracle'}):
         x = j[j.model == m]
-        lines.append(f'- {m} on both simulations: |F1 difference| median {x.f1_diff.abs().median():.3f}, maximum '
+        lines.append(f'- {m} ran on both simulations: |F1 difference| median {x.f1_diff.abs().median():.3f}, maximum '
                      f'{x.f1_diff.abs().max():.3f}; |IGR difference| median {x.igr_diff.abs().median():.3f}, maximum '
                      f'{x.igr_diff.abs().max():.3f} ({len(x)} runs).')
     return lines
