@@ -84,6 +84,11 @@ class StudyPipeline(unittest.TestCase):
         cls.first_runs = cls._listing(os.path.join(cls.run_dir, 'simulated_runs'))
         for cmd in ('extend', 'simulate', 'train', 'select', 'score', 'table'):
             cls.rc |= st.main([cmd] + cls.base)
+        # a baseline added afterwards: its own simulation of the held-out runs, then the tables again
+        cls.second_scores = pd.read_csv(scored, keep_default_na=False)
+        cls.second_runs = cls._listing(os.path.join(cls.run_dir, 'simulated_runs'))
+        cls.rc |= st.main(['baselines', '--methods', 'fiad', 'diffstats'] + cls.base)
+        cls.rc |= st.main(['table'] + cls.base)
         cls.after = cls._listing(pooled) + cls._listing(bfix)
         cls.cfg = st.load_cfg(cls.run_dir)
 
@@ -269,6 +274,45 @@ class StudyPipeline(unittest.TestCase):
         det = st.detectors(self.cfg, ROOT_NAME, P, 'in_dist', 'emoji')[0]
         with self.assertRaises(RuntimeError):
             st._select(det, [u], st.Scorer(torch.device('cpu')), os.path.join(self.tmp, 'nope'), {'variant': 'x'})
+
+    def test_baseline_added_after_the_simulation(self):
+        held = [r for r in st.plan(self.cfg) if r['role'] == 'heldout_test']
+        files = [st.baseline_path(self.cfg, r) for r in held]
+        self.assertTrue(all(os.path.exists(f) for f in files))
+        # nothing of the finished run directory changed: stored runs and scored rows
+        self.assertEqual(self.second_runs, self._listing(os.path.join(self.run_dir, 'simulated_runs')))
+        scored = pd.read_csv(os.path.join(self.run_dir, 'scores', ROOT_NAME, 'scored_runs.csv'), keep_default_na=False)
+        pd.testing.assert_frame_equal(scored, self.second_scores)
+        self.assertNotIn('fiad', set(scored.model))
+        rows = pd.read_csv(os.path.join(self.run_dir, 'baseline_runs', 'baseline_runs.csv'), keep_default_na=False)
+        self.assertEqual(rows.groupby('model').size().to_dict(),
+                         {m: len(held) for m in ('no_defense', 'oracle', 'fiad', 'diffstats')})
+        o = rows[rows.model == 'oracle']
+        self.assertTrue((o.FP == 0).all() and (o.FN == 0).all())
+        self.assertTrue((rows[rows.model == 'no_defense'].flagged == 0).all())
+        # the same true items and targets as the study's simulation of the run, other LDP noise
+        u = st.load_runs(self.cfg, ROOT_NAME, 'heldout_test', P, ['zipf'])[0]
+        mine = rows[(rows.seed == u.run['seed']) & (rows.model == 'oracle')].iloc[0]
+        self.assertEqual(int(mine.TP), int(u.labels.sum()))
+        self.assertNotEqual(float(mine.igr), u.igr(u.labels == 1))
+        # a finished run is skipped
+        before = self._listing(os.path.join(self.run_dir, 'baseline_runs', ROOT_NAME))
+        self.assertEqual(st.main(['baselines', '--methods', 'fiad'] + self.base), 0)
+        self.assertEqual(before, self._listing(os.path.join(self.run_dir, 'baseline_runs', ROOT_NAME)))
+        # FIAD is in the tables (it was not flagged at simulation time); Diffstats keeps its own rows
+        side = os.path.join(self.run_dir, 'comparison', 'side_by_side')
+        tab = pd.read_csv(os.path.join(side, 'side_by_side_by_test_beta.csv'))
+        for kind in ('in_dist', 'cross'):
+            f = tab[(tab.kind == kind) & (tab.variant == 'FIAD')]
+            self.assertEqual(sorted(f.test_beta), [0.05, 0.1])
+            self.assertEqual(int(f.n_runs.sum()), len(held))
+            self.assertEqual(len(tab[(tab.kind == kind) & (tab.variant == 'Diffstats')]), 2)
+            self.assertIn('FIAD', set(pd.read_csv(os.path.join(self.run_dir, 'comparison', kind,
+                                                               'sweep_test_beta.csv')).variant))
+        chk = pd.read_csv(os.path.join(side, 'baseline_resimulation_check.csv'))
+        self.assertEqual(set(chk.model), {'no_defense', 'oracle', 'diffstats'})
+        self.assertEqual(len(chk), 3 * len(held))
+        self.assertIn('fiad was added after the simulation', open(os.path.join(side, 'limitations.md')).read())
 
     def test_scores_and_tables(self):
         df = pd.read_csv(os.path.join(self.run_dir, 'scores', ROOT_NAME, 'scored_runs.csv'), keep_default_na=False)

@@ -542,6 +542,81 @@ def simulate_runs(cfg, runs, args):
 
 
 # ------------------------------------------------------------------------------------------
+# baselines added after the simulation (FIAD): held-out runs simulated again
+# ------------------------------------------------------------------------------------------
+# A stored run keeps the features and each user's report on the target items, not the (n, d) report matrix
+# a baseline detector reads. A baseline that was not flagged while the run was simulated therefore gets
+# its own simulation of the held-out run: same design and seed (same true items and targets), fresh LDP
+# noise. Its rows are measured on that simulation; no removal and perfect removal on the same simulation
+# are stored next to it, so the two simulations of a run can be compared.
+
+def baseline_path(cfg, run):
+    return os.path.join(cfg['run_dir'], 'baseline_runs', run['root'], cell(run['dataset_type'], run['protocol']),
+                        igr.run_tag(run) + '.csv')
+
+
+def baseline_run(run, methods, processors=4):
+    """Rows (no removal, perfect removal, every method) of one held-out run simulated again."""
+    from . import mse_threshold_study as ms
+    from .baselines import BASELINES
+    X, targets, support, labels, estimate, one_list = igr.simulate(run, processors)
+    n, d = len(labels), int(run['domain'])
+    sup = igr.Support.from_dense(support)
+    del support
+    rd = igr.RunData(run, labels, targets, igr.genuine_frequency(X, labels, d), sup)
+    dev = np.abs(rd.estimate() * n - estimate).max() / max(1.0, np.abs(estimate).max())
+    if dev > 1e-6:
+        raise RuntimeError(f'estimator does not reproduce the generator estimate (rel. dev {dev:.2e})')
+    bits = sup.bits[:, rd.targets]
+    target_sum = sup.lo * len(rd.targets) + (sup.hi - sup.lo) * bits.sum(axis=1)
+    per_target = {'bits': bits, 'lo': sup.lo, 'hi': sup.hi, 'true': rd.f_true[rd.targets].astype(np.float64)}
+    none = np.zeros((n, 0))
+    u = StudyRun(run, none, labels, target_sum, rd.A, rd.B, rd.f_true[rd.targets].sum(), none, targets=per_target)
+    masks = [('no_defense', np.zeros(n, dtype=bool), 0.0), ('oracle', u.labels == 1, 0.0)]
+    for m in methods:
+        t0 = time.time()
+        mask = np.zeros(n, dtype=bool)
+        mask[np.asarray(BASELINES[m](sup.bits, one_list, run, processors), dtype=np.int64)] = True
+        masks.append((m, mask, time.time() - t0))
+    key = {k: run.get(k) for k in KEYS}
+    return [{**key, 'kind': 'both', 'model': name, 'threshold_rule': '', 'threshold': '', 'model_sha': '',
+             **u.metrics(mask), 'mse_target': ms.mse_target(u, mask), 'seconds': round(secs, 1)}
+            for name, mask, secs in masks]
+
+
+def cmd_baselines(args):
+    """Baselines on new simulations of the held-out runs -> <run directory>/baseline_runs/ (one file per run;
+    a run whose file has every requested method is skipped)."""
+    cfg = load_cfg(args.run_dir)
+    methods = list(dict.fromkeys(args.methods or ['fiad']))
+    runs = [r for r in plan(cfg) if r['role'] == 'heldout_test']
+    mine = runs[args.shard::args.num_shards]
+    say(f"baselines shard {args.shard}/{args.num_shards}: {', '.join(methods)} on {len(mine)} of {len(runs)} held-out runs")
+    failed = 0
+    for i, run in enumerate(mine, 1):
+        path = baseline_path(cfg, run)
+        desc = f"[{i}/{len(mine)}] {run['root']} {cell(run['dataset_type'], run['protocol'])} {igr.run_tag(run)}"
+        if os.path.exists(path) and set(methods) <= set(pd.read_csv(path, keep_default_na=False).model):
+            say(f'{desc}  (done)')
+            continue
+        try:
+            t0 = time.time()
+            rows = pd.DataFrame(baseline_run(run, methods, args.processors))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            rows.to_csv(f'{path}.{os.getpid()}.tmp', index=False)
+            os.replace(f'{path}.{os.getpid()}.tmp', path)
+            r = rows.set_index('model')
+            say(f'{desc}  {time.time() - t0:.0f}s  no-removal IGR {r.igr["no_defense"]:+.3f}  '
+                + '  '.join(f'{m}: flagged {int(r.flagged[m]):,} F1 {r.f1[m]:.3f} IGR {r.igr[m]:+.3f}' for m in methods))
+        except Exception as e:
+            import traceback
+            failed += 1
+            say(f'{desc}  FAILED: {e}\n{traceback.format_exc()}')
+    say(f'baselines shard {args.shard} finished; {failed} failed')
+    return 1 if failed else 0
+
+
+# ------------------------------------------------------------------------------------------
 # training (the fixed-beta procedure on stored runs)
 # ------------------------------------------------------------------------------------------
 
@@ -896,7 +971,7 @@ def cmd_score(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('cmd', choices=['init', 'extend', 'plan', 'simulate', 'train', 'select', 'score', 'table'])
+    ap.add_argument('cmd', choices=['init', 'extend', 'plan', 'simulate', 'baselines', 'train', 'select', 'score', 'table'])
     ap.add_argument('--run-dir', required=True)
     ap.add_argument('--results', default=os.path.join(ROOT, 'results'), help='init: where existing results live')
     ap.add_argument('--roots', nargs='+', choices=sorted(DEFAULT_ROOTS), help='init: data roots (default: both)')
@@ -904,6 +979,8 @@ def main(argv=None):
     ap.add_argument('--baselines', nargs='*', default=['diffstats'], choices=['diffstats', 'fiad'],
                     help='init: baselines flagged on the held-out runs (FIAD is slow)')
     ap.add_argument('--variants', nargs='+', help='extend: trained variants to add (default: all it lacks)')
+    ap.add_argument('--methods', nargs='+', choices=['fiad', 'diffstats'],
+                    help='baselines: detectors to run on new simulations of the held-out runs (default: fiad)')
     ap.add_argument('--shard', type=int, default=0)
     ap.add_argument('--num-shards', type=int, default=1)
     ap.add_argument('--processors', type=int, default=4)
@@ -911,7 +988,8 @@ def main(argv=None):
     if args.cmd == 'table':
         from .threshold_scaling_table import build
         return build(load_cfg(args.run_dir))
-    return {'init': cmd_init, 'extend': cmd_extend, 'plan': cmd_plan, 'simulate': cmd_simulate, 'train': cmd_train,
+    return {'init': cmd_init, 'extend': cmd_extend, 'plan': cmd_plan, 'simulate': cmd_simulate,
+            'baselines': cmd_baselines, 'train': cmd_train,
             'select': cmd_select, 'score': cmd_score}[args.cmd](args)
 
 

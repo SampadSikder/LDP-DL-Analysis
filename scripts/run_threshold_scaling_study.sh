@@ -21,6 +21,9 @@
 # the runs and models they need are simulated and trained (42 models per variant for both roots; the
 # pooled-beta variants need 273 more runs), every model is scored again, tables and the tarball are redone:
 #   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh extend simulate train select score table pack
+# FIAD is not run by default (slow). It is added to a finished run directory with the fiad stage: each
+# held-out run is simulated again for it (294 runs for both roots; no GPU), then the tables are redone:
+#   RESUME=results/threshold_and_scaling_study bash scripts/run_threshold_scaling_study.sh fiad table pack
 #
 # Stages (`all` = check init plan simulate train select score table pack):
 #   check     unit tests of the study, of the fixed-beta variant and of IGR (CPU, a few minutes)
@@ -32,6 +35,9 @@
 #   simulate  every training, validation, utility-validation and held-out run, once (966 runs for both
 #             roots, 1239 with the pooled-beta variants); SHARDS processes x PROC threads; Diffstats is
 #             flagged on the held-out runs
+#   fiad      (RESUME only, not part of `all`) FIAD on a new simulation of every held-out run (the stored
+#             runs do not keep the report matrix); Diffstats on the same simulation as a check;
+#             SHARDS processes x PROC threads, finished runs are skipped
 #   train     the fixed-beta feature variants, one model per root, protocol, dataset and kind
 #             (42 models per variant for both roots); JOBS processes on the GPUs in GPUS
 #   select    utility threshold (mean IGR^2 on utility-validation runs) of the pooled checkpoints and of the
@@ -62,7 +68,7 @@ say () { echo "[$(date '+%F %T')] $*"; }
 study () { "$PY" -m attacker_detector.threshold_scaling_study "$@" --run-dir "$RUN_DIR"; }
 
 STAGES=("$@")
-(( ${#STAGES[@]} )) || { sed -n '2,46p' "$0"; exit 1; }
+(( ${#STAGES[@]} )) || { sed -n '2,52p' "$0"; exit 1; }
 if [[ -n ${RESUME:-} ]]; then
   RUN_DIR=${RESUME%/}
   [[ -f $RUN_DIR/study_config.json ]] || { echo "RESUME=$RUN_DIR is not a run directory of this study"; exit 1; }
@@ -74,9 +80,10 @@ else
   [[ ${STAGES[*]} == all ]] && STAGES=(check init plan simulate train select score table pack)
   [[ " ${STAGES[*]} " == *" init "* ]] || { echo "a new invocation needs the init stage (or RESUME=<run directory>)"; exit 1; }
   [[ " ${STAGES[*]} " == *" extend "* ]] && { echo "extend adds to an existing run directory: RESUME=<run directory>"; exit 1; }
+  [[ " ${STAGES[*]} " == *" fiad "* ]] && { echo "fiad adds to an existing run directory: RESUME=<run directory>"; exit 1; }
 fi
 for s in "${STAGES[@]}"; do
-  case $s in check|init|extend|plan|simulate|train|select|score|table|pack) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
+  case $s in check|init|extend|plan|simulate|fiad|train|select|score|table|pack) ;; *) echo "unknown stage: $s"; exit 1 ;; esac
 done
 TARBALL=$RES/$(basename "$RUN_DIR").tar.gz
 
@@ -153,6 +160,14 @@ stage_score () {
 }
 
 stage_table () { study table 2>&1 | tee "$RUN_DIR/logs/table.log"; return "${PIPESTATUS[0]}"; }
+
+stage_fiad () {
+  say "fiad: held-out runs simulated again for FIAD, $SHARDS shards x $PROC threads (logs: $RUN_DIR/logs/baselines_shard*.log)"
+  shards baselines "$SHARDS" cpu --processors "$PROC" --methods fiad diffstats; local rc=$?
+  say "fiad: $(find "$RUN_DIR/baseline_runs" -mindepth 3 -name '*.csv' 2>/dev/null | wc -l) runs stored"
+  (( rc )) && say "fiad: some runs failed; run the stage again (RESUME=$RUN_DIR), finished runs are skipped"
+  return $rc
+}
 
 stage_pack () {
   tar czf "$TARBALL.tmp" -C "$RES" --exclude="$(basename "$RUN_DIR")/simulated_runs" "$(basename "$RUN_DIR")" \

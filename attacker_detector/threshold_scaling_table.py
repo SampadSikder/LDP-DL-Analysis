@@ -101,6 +101,17 @@ F1_TOL, IGR2_REL, IGR2_ABS = 0.01, 0.10, 0.001      # what counts as a change in
 GROUP = ['attack', 'kind', 'protocol']
 
 
+def baseline_rows(cfg):
+    """Rows of the baselines stage (new simulations of the held-out runs), or None. Also writes them to
+    baseline_runs/baseline_runs.csv."""
+    files = sorted(glob.glob(os.path.join(cfg['run_dir'], 'baseline_runs', '*', '*', '*.csv')))
+    if not files:
+        return None
+    df = pd.concat([pd.read_csv(f, keep_default_na=False, na_values=['nan']) for f in files], ignore_index=True)
+    df.to_csv(os.path.join(cfg['run_dir'], 'baseline_runs', 'baseline_runs.csv'), index=False)
+    return df
+
+
 def load(cfg, variants=None):
     variants = VARIANTS if variants is None else variants
     frames = []
@@ -114,6 +125,9 @@ def load(cfg, variants=None):
     if not frames:
         raise SystemExit('no scored runs; run the score stage first')
     df = pd.concat(frames, ignore_index=True)
+    extra = baseline_rows(cfg)             # baselines flagged later, on their own simulation of the run
+    if extra is not None:
+        df = pd.concat([df, extra[~extra.model.isin(set(df.model))]], ignore_index=True)
     both = df[df.kind == 'both']           # no removal, perfect removal, baselines: the same for both kinds
     df = pd.concat([df[df.kind != 'both']] + [both.assign(kind=k) for k in ('in_dist', 'cross')], ignore_index=True)
     label = {(m, r): lab for lab, m, r in variants}
@@ -205,6 +219,41 @@ def hyperparameters(cfg, out):
     return pc
 
 
+def baseline_check(cfg, side):
+    """How far the new simulations of the baselines stage are from the study's own simulation of the same
+    held-out runs: no removal, perfect removal and every baseline present in both, per run ->
+    baseline_resimulation_check.csv. Returns the lines for limitations.md."""
+    extra = baseline_rows(cfg)
+    if extra is None:
+        return []
+    files = sorted(glob.glob(os.path.join(cfg['run_dir'], 'scores', '*', 'cells', '*.csv')))
+    main = pd.concat([pd.read_csv(f, keep_default_na=False, na_values=['nan']) for f in files], ignore_index=True)
+    main = main[main.kind == 'both']
+    keys = ['root', 'dataset_type', 'protocol', 'epsilon', 'attacker_ratio', 'splits', 'seed', 'model']
+    cols = ['f1', 'recall', 'fpr', 'flagged', 'igr']
+    j = main[keys + cols].merge(extra[keys + cols], on=keys, suffixes=('_study', '_resimulated'))
+    for c in ('f1', 'igr'):
+        j[f'{c}_diff'] = pd.to_numeric(j[f'{c}_resimulated'], errors='coerce') - pd.to_numeric(j[f'{c}_study'], errors='coerce')
+    j.to_csv(os.path.join(side, 'baseline_resimulation_check.csv'), index=False)
+    added = sorted(set(extra.model) - set(main.model))
+    lines = [f"- {', '.join(added) or 'No baseline'} was added after the simulation: the report matrix of a stored "
+             'run is not kept, so each held-out run was simulated again for it (same design and seed: same true '
+             f'items and targets; fresh LDP noise; {extra.seed.nunique()} runs). Its rows are measured on that '
+             'simulation, every other row on the study\'s own. In the tables its "no removal" reference is the '
+             'study\'s own simulation.']
+    none = j[j.model == 'no_defense']
+    if len(none):
+        lines.append(f'- The two simulations of a run, without removal: |IGR difference| has median '
+                     f'{none.igr_diff.abs().median():.3f} and maximum {none.igr_diff.abs().max():.3f} over {len(none)} '
+                     'runs (baseline_resimulation_check.csv).')
+    for m in sorted(set(j.model) - {'no_defense', 'oracle'}):
+        x = j[j.model == m]
+        lines.append(f'- {m} on both simulations: |F1 difference| median {x.f1_diff.abs().median():.3f}, maximum '
+                     f'{x.f1_diff.abs().max():.3f}; |IGR difference| median {x.igr_diff.abs().median():.3f}, maximum '
+                     f'{x.igr_diff.abs().max():.3f} ({len(x)} runs).')
+    return lines
+
+
 def build(cfg):
     out = os.path.join(cfg['run_dir'], 'comparison')
     side = os.path.join(out, 'side_by_side')
@@ -266,6 +315,8 @@ def build(cfg):
         prep['f1_diff'] = prep.f1_control - prep.f1_existing
         prep.to_csv(os.path.join(side, 'replication_check_pooled.csv'), index=False)
 
+    resim = baseline_check(cfg, side)
+
     for kind in ('in_dist', 'cross'):
         d = df[df.kind == kind]
         dflt = {'epsilon': 1.0, 'test_beta': float(next(iter(cfg['roots'].values()))['source_beta']), 'splits': 4}
@@ -315,7 +366,8 @@ def build(cfg):
              f'for this protocol may have scored those older models.'
              for name, rc in cfg['roots'].items() for P, d in (rc.get('pooled_dirs') or {}).items()],
            f"- Baselines on the held-out runs: {', '.join(cfg.get('heldout_baselines', [])) or 'none'}. A baseline "
-           'missing from a table failed on that run (see logs).', '']
+           'missing from a table failed on that run (see logs).',
+           *resim, '']
     if len(rep):
         lim.insert(-1, f'- Replication check: |F1 control - F1 existing| has median {rep.f1_diff.abs().median():.3f} '
                        f'and maximum {rep.f1_diff.abs().max():.3f} over {len(rep)} rows.')
